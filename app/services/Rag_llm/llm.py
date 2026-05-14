@@ -6,26 +6,25 @@ import datetime
 import tiktoken
 import chromadb
 import sqlalchemy
+import json
 import pandas as pd
 
 from sqlalchemy import text
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, TypedDict
+from typing import Dict, List, Optional, TypedDict, Tuple
 
 from app.config import settings
 from llama_index.llms.gemini import Gemini
-from google.genai.types import EmbedContentConfig
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.retrievers.bm25 import BM25Retriever
 from llama_index.core.ingestion import IngestionPipeline
-from llama_index.core.schema import Document, MetadataMode
+from llama_index.core.schema import MetadataMode
 from llama_index.core.chat_engine import ContextChatEngine
 from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.retrievers import QueryFusionRetriever
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.postprocessor import SentenceTransformerRerank
-from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
 from chromadb.errors import ChromaError
 from llama_index.core.callbacks import CallbackManager, TokenCountingHandler
 
@@ -33,7 +32,6 @@ from app.services.Rag_llm.llm_config import DEFAULT_CHROMA_COLLECTION, DEFAULT_L
 
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, StorageContext, Settings, ChatPromptTemplate, load_index_from_storage
 from llama_index.core.node_parser import MarkdownNodeParser, SentenceSplitter
-
 
 # --- Configuration Constants ---
 
@@ -171,18 +169,16 @@ class ChatBot:
             logger.error(f"Failed to initialize cache: {e}")
             self.cache_collection = None
 
-    def _check_cache(self, query_text: str, threshold: float = 0.2) -> Optional[str]:
+    def _check_cache(self, query_text: str, threshold: float = 0.2) -> Tuple[Optional[str], Optional[List[Dict]]]:
         """
-        Busca en el caché. Si encuentra algo, verifica que no tenga más de 3 días.
-        Si es viejo, lo borra y retorna None (Cache Miss) para generar una nueva respuesta.
+        Busca en el caché. Si encuentra algo, retorna la respuesta y sus fuentes originales.
         """
         if not self.cache_collection:
-            return None
+            return None, None
 
         try:
             query_embedding = Settings.embed_model.get_query_embedding(query_text)
             
-            # Solicitamos metadatos e IDs en la consulta
             results = self.cache_collection.query(
                 query_embeddings=[query_embedding],
                 n_results=1,
@@ -193,7 +189,6 @@ class ChatBot:
                 distance = results['distances'][0][0] # type: ignore
                 
                 if distance < threshold:
-                    # Datos recuperados
                     cached_id = results['ids'][0][0]
                     cached_doc = results['documents'][0][0] # type: ignore
                     metadata = results['metadatas'][0][0] if results['metadatas'] else {}
@@ -203,31 +198,34 @@ class ChatBot:
                     
                     if timestamp_str:
                         try:
-                            # Convertimos el string guardado a objeto datetime
                             stored_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f') # type: ignore
-                            
-                            # Verificamos la antigüedad
                             if datetime.now() - stored_time > timedelta(days=3):
                                 logger.info(f"Cache entry expired (Age > 3 days). Deleting ID: {cached_id}")
-                                # Borramos la entrada antigua
                                 self.cache_collection.delete(ids=[cached_id])
-                                return None # Retornamos None para forzar nueva generación
+                                return None, None 
                                 
                         except ValueError:
                             logger.warning("Error parsing cache timestamp. Treating as expired.")
-                            return None
+                            return None, None
+
+                    # Extraer fuentes desde los metadatos
+                    source_nodes_str = metadata.get("source_nodes", "[]")
+                    try:
+                        source_nodes = json.loads(source_nodes_str) # type: ignore
+                    except (json.JSONDecodeError, TypeError):
+                        source_nodes = []
 
                     logger.info(f"Cache HIT (Dist: {distance:.4f}): {query_text[:30]}...")
-                    return cached_doc
+                    return cached_doc, source_nodes
             
             logger.info("Cache MISS")
-            return None
+            return None, None
 
         except Exception as e:
             logger.error(f"Error checking cache: {e}")
-            return None
+            return None, None
     
-    def _save_to_cache(self, query_text: str, response_text: str):
+    def _save_to_cache(self, query_text: str, response_text: str, source_nodes_data: List[Dict]):
         if not self.cache_collection:
             return
 
@@ -236,15 +234,15 @@ class ChatBot:
             import uuid
             cache_id = str(uuid.uuid4())
 
-            # Guardamos con timestamp
+            # Guardamos con timestamp y el JSON de los source_nodes
             self.cache_collection.add(
                 ids=[cache_id],
                 embeddings=[query_embedding],
                 documents=[response_text],
                 metadatas=[{
                     "original_query": query_text, 
-                    # Usamos este formato exacto para poder leerlo después
-                    "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f') 
+                    "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'),
+                    "source_nodes": json.dumps(source_nodes_data) # Serialización a JSON
                 }]
             )
             logger.info(f"Saved to cache: {query_text[:50]}...")
@@ -677,10 +675,12 @@ class ChatBot:
         logger.info(f"Task {task_id}: Starting sync processing for user {user_id}")
 
         # 1. Caché
-        cached_response = self._check_cache(query_text)
+        cached_response, cached_sources = self._check_cache(query_text)
         if cached_response:
-            self._log_query_details(query_text, cached_response, "Respuesta desde Caché", user_id, task_id, 0, 0, 0)
-            return QueryResponse(response=cached_response, context="Respuesta desde Caché", source_nodes=[], input_tokens=0, output_tokens=0)
+            # Reconstruimos un mini context_str para los logs
+            context_str = "Respuesta desde Caché\nFuentes recuperadas: " + ", ".join([s.get('filename', 'N/A') for s in (cached_sources or [])])
+            self._log_query_details(query_text, cached_response, context_str, user_id, task_id, 0, 0, 0)
+            return QueryResponse(response=cached_response, context=context_str, source_nodes=cached_sources or [], input_tokens=0, output_tokens=0)
 
         try:
             # 2. Preparar Componentes (Sync)
@@ -693,12 +693,14 @@ class ChatBot:
             response_obj = chat_engine.chat(query_text)
             response_text = str(response_obj)
 
-            if len(response_text) > 20 and "Error" not in response_text:
-                self._save_to_cache(query_text, response_text)
-
-            # 4. Formatear y Loguear
+            # 4. Formatear
             context_str, source_nodes_data = self._format_source_context(response_obj.source_nodes, query_text)
             
+            # Guardamos en caché AHORA, porque ya tenemos las fuentes
+            if len(response_text) > 20 and "Error" not in response_text:
+                self._save_to_cache(query_text, response_text, source_nodes_data)
+
+            # Loguear
             input_tokens = self.token_counter.prompt_llm_token_count or 0
             output_tokens = self.token_counter.completion_llm_token_count or 0
             embedding_tokens = self.token_counter.total_embedding_token_count
@@ -724,10 +726,11 @@ class ChatBot:
         logger.info(f"Task {task_id}: Starting async processing for user {user_id}")
 
         # 1. Caché
-        cached_response = self._check_cache(query_text)
+        cached_response, cached_sources = self._check_cache(query_text)
         if cached_response:
             yield cached_response
-            self._log_query_details(query_text, cached_response, "Respuesta desde Caché", user_id, task_id, 0, 0, 0)
+            context_str = "Respuesta desde Caché\nFuentes recuperadas: " + ", ".join([s.get('filename', 'N/A') for s in (cached_sources or [])])
+            self._log_query_details(query_text, cached_response, context_str, user_id, task_id, 0, 0, 0)
             return
 
         try:
@@ -745,11 +748,12 @@ class ChatBot:
                 full_response += token
                 yield token
             
-            if len(full_response) > 20 and "Error" not in full_response:
-                self._save_to_cache(query_text, full_response)
+            # 4. Formatear y Loguear (Observa que aquí quitamos el "_")
+            context_str, source_nodes_data = self._format_source_context(streaming_response.source_nodes, query_text)
 
-            # 4. Formatear y Loguear
-            context_str, _ = self._format_source_context(streaming_response.source_nodes, query_text)
+            # Guardamos en el caché después de procesar y tener los nodos
+            if len(full_response) > 20 and "Error" not in full_response:
+                self._save_to_cache(query_text, full_response, source_nodes_data)
             
             input_tokens = self.token_counter.prompt_llm_token_count or 0
             output_tokens = self.token_counter.completion_llm_token_count or 0
