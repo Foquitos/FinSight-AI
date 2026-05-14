@@ -1,12 +1,12 @@
 import os
 import re
+import json
 import logging
 import asyncio
 import datetime
 import tiktoken
 import chromadb
 import sqlalchemy
-import json
 import pandas as pd
 
 from sqlalchemy import text
@@ -15,16 +15,18 @@ from typing import Dict, List, Optional, TypedDict, Tuple
 
 from app.config import settings
 from llama_index.llms.gemini import Gemini
+from google.genai.types import EmbedContentConfig
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.retrievers.bm25 import BM25Retriever
 from llama_index.core.ingestion import IngestionPipeline
-from llama_index.core.schema import MetadataMode
+from llama_index.core.schema import Document, MetadataMode
 from llama_index.core.chat_engine import ContextChatEngine
 from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.retrievers import QueryFusionRetriever
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.postprocessor import SentenceTransformerRerank
+from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
 from chromadb.errors import ChromaError
 from llama_index.core.callbacks import CallbackManager, TokenCountingHandler
 
@@ -32,6 +34,7 @@ from app.services.Rag_llm.llm_config import DEFAULT_CHROMA_COLLECTION, DEFAULT_L
 
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, StorageContext, Settings, ChatPromptTemplate, load_index_from_storage
 from llama_index.core.node_parser import MarkdownNodeParser, SentenceSplitter
+
 
 # --- Configuration Constants ---
 
@@ -155,14 +158,14 @@ class ChatBot:
         self._setup_prompts(system_prompt, qa_prompt_str, refine_prompt_str)
         self._setup_query_engine()
         self._initialize_cache()
-        # Clave: user_id (int), Valor: ChatMemoryBuffer
+        # Key: user_id (int), Value: ChatMemoryBuffer
         logger.info("ChatBot initialization complete.")
 
     def _initialize_cache(self):
-        """Inicializa una colección separada para el caché de preguntas frecuentes."""
+        """Initializes a separate collection for the FAQ cache."""
         try:
             db = chromadb.PersistentClient(path=self.embedding_storage_path)
-            # Creamos/Obtenemos una colección específica para el caché
+            # Create/Get a specific collection for the cache
             self.cache_collection = db.get_or_create_collection(f"{self.collection_name}_cache")
             logger.info("Cache collection initialized.")
         except Exception as e:
@@ -171,7 +174,7 @@ class ChatBot:
 
     def _check_cache(self, query_text: str, threshold: float = 0.2) -> Tuple[Optional[str], Optional[List[Dict]]]:
         """
-        Busca en el caché. Si encuentra algo, retorna la respuesta y sus fuentes originales.
+        Searches the cache. If found, returns the response and its original sources.
         """
         if not self.cache_collection:
             return None, None
@@ -179,6 +182,7 @@ class ChatBot:
         try:
             query_embedding = Settings.embed_model.get_query_embedding(query_text)
             
+            # Request metadata and IDs in the query
             results = self.cache_collection.query(
                 query_embeddings=[query_embedding],
                 n_results=1,
@@ -193,22 +197,26 @@ class ChatBot:
                     cached_doc = results['documents'][0][0] # type: ignore
                     metadata = results['metadatas'][0][0] if results['metadatas'] else {}
                     
-                    # --- LÓGICA DE CADUCIDAD (3 DÍAS) ---
+                    # --- EXPIRATION LOGIC (3 DAYS) ---
                     timestamp_str = metadata.get("timestamp")
                     
                     if timestamp_str:
                         try:
+                            # Convert the saved string to a datetime object
                             stored_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f') # type: ignore
+                            
+                            # Check the age
                             if datetime.now() - stored_time > timedelta(days=3):
                                 logger.info(f"Cache entry expired (Age > 3 days). Deleting ID: {cached_id}")
+                                # Delete the old entry
                                 self.cache_collection.delete(ids=[cached_id])
-                                return None, None 
+                                return None, None # Return None to force new generation
                                 
                         except ValueError:
                             logger.warning("Error parsing cache timestamp. Treating as expired.")
                             return None, None
 
-                    # Extraer fuentes desde los metadatos
+                    # Extract sources from metadata
                     source_nodes_str = metadata.get("source_nodes", "[]")
                     try:
                         source_nodes = json.loads(source_nodes_str) # type: ignore
@@ -234,7 +242,7 @@ class ChatBot:
             import uuid
             cache_id = str(uuid.uuid4())
 
-            # Guardamos con timestamp y el JSON de los source_nodes
+            # Save with timestamp and the JSON of the source_nodes
             self.cache_collection.add(
                 ids=[cache_id],
                 embeddings=[query_embedding],
@@ -242,7 +250,7 @@ class ChatBot:
                 metadatas=[{
                     "original_query": query_text, 
                     "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'),
-                    "source_nodes": json.dumps(source_nodes_data) # Serialización a JSON
+                    "source_nodes": json.dumps(source_nodes_data) # JSON serialization
                 }]
             )
             logger.info(f"Saved to cache: {query_text[:50]}...")
@@ -250,21 +258,21 @@ class ChatBot:
             logger.error(f"Error saving to cache: {e}")
 
     def clear_full_cache(self):
-        """Elimina y recrea la colección de caché para purgar datos antiguos."""
+        """Deletes and recreates the cache collection to purge old data."""
         logger.info("Clearing semantic cache...")
         try:
-            # Instanciamos el cliente para gestionar las colecciones
+            # Instantiate the client to manage collections
             db = chromadb.PersistentClient(path=self.embedding_storage_path)
             cache_name = f"{self.collection_name}_cache"
             
             try:
-                # Borramos la colección entera
+                # Delete the entire collection
                 db.delete_collection(cache_name)
                 logger.info(f"Collection '{cache_name}' deleted.")
             except Exception as e:
                 logger.warning(f"Could not delete collection '{cache_name}' (maybe it didn't exist): {e}")
             
-            # La recreamos vacía inmediatamente
+            # Recreate it empty immediately
             self.cache_collection = db.get_or_create_collection(cache_name)
             logger.info("Cache collection recreated and empty.")
             
@@ -273,22 +281,22 @@ class ChatBot:
 
     async def _get_memory_for_user_async(self, user_id: int):
         loop = asyncio.get_running_loop()
-        # Ejecuta la función sincrónica en un thread pool para no congelar la API
+        # Executes the synchronous function in a thread pool to avoid freezing the API
         return await loop.run_in_executor(None, self._get_memory_for_user, user_id)
 
     def _get_memory_for_user(self, user_id: int) -> ChatMemoryBuffer:
         """
-        Reconstruye el historial del usuario desde la base de datos SQL.
-        Esto permite que funcione con múltiples workers de Gunicorn.
+        Reconstructs the user's history from the SQL database.
+        This allows it to work with multiple Gunicorn workers.
         """
-        # Límite de mensajes a recuperar para no saturar el contexto (ej. últimos 5 pares = 10 mensajes)
+        # Limit of messages to retrieve to avoid saturating the context (e.g., last 5 pairs = 10 messages)
         history_limit = 5 
         
-        # Inicializar buffer vacío
+        # Initialize empty buffer
         memory = ChatMemoryBuffer.from_defaults(token_limit=3000)
         
         if not self.sql_engine:
-            logger.warning("SQL Engine no disponible. Usando memoria volátil vacía.")
+            logger.warning("SQL Engine not available. Using empty volatile memory.")
             return memory
 
         try:
@@ -296,14 +304,14 @@ class ChatBot:
                 SELECT query, response 
                 FROM query_chatbots_logs
                 WHERE user_id = :uid and active = 1
-                ORDER BY fecha DESC
+                ORDER BY date DESC
                 LIMIT :limit
             """)
             
             with self.sql_engine.connect() as conn:
                 result = conn.execute(query, {"limit": history_limit, "uid": user_id}).fetchall()
 
-            # Los resultados vienen del más reciente al más antiguo, así que los invertimos
+            # Results come from newest to oldest, so we reverse them
             for row in reversed(result):
                 user_msg = row.query
                 bot_msg = row.response
@@ -313,11 +321,11 @@ class ChatBot:
                 if bot_msg:
                     memory.put(ChatMessage(role=MessageRole.ASSISTANT, content=str(bot_msg)))
             
-            logger.info(f"Historial reconstruido para usuario {user_id} con {len(result)} interacciones previas.")
+            logger.info(f"History reconstructed for user {user_id} with {len(result)} previous interactions.")
 
         except Exception as e:
-            logger.error(f"Error recuperando historial de SQL: {e}")
-            # Devolvemos memoria vacía en caso de error para no romper el flujo
+            logger.error(f"Error retrieving history from SQL: {e}")
+            # Return empty memory in case of error to avoid breaking the flow
         
         return memory
 
@@ -341,14 +349,14 @@ class ChatBot:
         logger.info(f"Configuring LlamaIndex settings)...")
         try:
 
-            # 1. Inicializa el manejador de conteo de tokens.
-            #    Usamos un tokenizer estándar como 'cl100k_base'.
+            # 1. Initializes the token counting handler.
+            #    We use a standard tokenizer like 'cl100k_base'.
             self.token_counter = TokenCountingHandler(
                 tokenizer=tiktoken.get_encoding("cl100k_base").encode
             )
 
-            # 2. Crea un CallbackManager y adjunta el contador de tokens.
-            #    Esto interceptará todas las llamadas a LLMs y embeddings.
+            # 2. Creates a CallbackManager and attaches the token counter.
+            #    This will intercept all calls to LLMs and embeddings.
             Settings.callback_manager = CallbackManager([self.token_counter])
             
             logger.info("TokenCountingHandler initialized and attached to global settings.")
@@ -358,7 +366,7 @@ class ChatBot:
             
             logger.info(f"Using remote Embedding Model: {remote_embed_model}")
             Settings.embed_model = HuggingFaceEmbedding(
-                model_name=remote_embed_model # Modelo súper rápido y top para RAG
+                model_name=remote_embed_model # Super fast and top model for RAG
             )
 
             logger.info(f"Using remote LLM (Gemini): {remote_llm_model}")
@@ -373,7 +381,7 @@ class ChatBot:
                 model=remote_llm_model,
                 temperature=DEFAULT_LLM_TEMP_REMOTE,
                 api_key=settings.GEMINI_CHATBOT_API_KEY,
-                safety_settings=safety_settings, # <--- Agregamos esto # type: ignore
+                safety_settings=safety_settings, # <--- We add this # type: ignore
             )
 
             self.reranker = SentenceTransformerRerank(
@@ -407,7 +415,7 @@ class ChatBot:
             raise RuntimeError(f"Failed to initialize vector store: {e}") from e
 
     def _initialize_index(self):
-        """Carga el índice existente o construye uno nuevo si está corrupto/vacío."""
+        """Loads the existing index or builds a new one if it is corrupted/empty."""
         persist_dir = self.embedding_storage_path 
         docstore_path = os.path.join(persist_dir, "docstore.json")
         index_store_path = os.path.join(persist_dir, "index_store.json")
@@ -423,7 +431,7 @@ class ChatBot:
                 chroma_collection = db.get_collection(self.collection_name)
                 vector_store_instance = ChromaVectorStore(chroma_collection=chroma_collection)
                 
-                # Reconstruir contexto desde disco
+                # Reconstruct context from disk
                 reconstructed_storage_context = StorageContext.from_defaults(
                     vector_store=vector_store_instance,
                     persist_dir=persist_dir 
@@ -435,11 +443,11 @@ class ChatBot:
                 )
                 self.storage_context = reconstructed_storage_context
                 
-                # --- VALIDACIÓN DE DOCSTORE ---
-                # Si cargó pero el docstore está vacío, BM25 fallará. Forzamos reconstrucción.
+                # --- DOCSTORE VALIDATION ---
+                # If loaded but the docstore is empty, BM25 will fail. Forcing reconstruction.
                 if not self.index.docstore or len(self.index.docstore.docs) == 0:
                     logger.warning("⚠️ Index loaded but Docstore is EMPTY! Index is inconsistent. Rebuilding...")
-                    index_loaded = False # Esto activará el _build_index abajo
+                    index_loaded = False # This will trigger _build_index below
                 else:
                     logger.info(f"Successfully loaded index with {len(self.index.docstore.docs)} documents.")
                     index_loaded = True
@@ -450,20 +458,20 @@ class ChatBot:
         
         if not index_loaded:
             if self.read_only:
-                # Si somos un worker de Gunicorn y falló la carga, NO construimos. Fallamos o iniciamos vacío.
-                logger.warning("⚠️ MODO READ_ONLY: No se encontró índice válido y no se permite construir. Iniciando índice vacío en memoria.")
+                # If we are a Gunicorn worker and loading failed, DO NOT build. Fail or start empty.
+                logger.warning("⚠️ READ_ONLY MODE: No valid index found and building is not allowed. Starting empty index in memory.")
                 self.index = VectorStoreIndex.from_documents([], storage_context=self.storage_context)
             else:
-                # Si somos el script de inicialización, construimos.
-                logger.info("Índice no encontrado o corrupto. Iniciando construcción (BUILD MODE)...")
+                # If we are the initialization script, we build.
+                logger.info("Index not found or corrupted. Starting build (BUILD MODE)...")
                 self._build_index()
 
     def _build_index(self):
-        """Construye el índice usando Markdown + Semantic parsing y asegura persistencia."""
+        """Builds the index using Markdown + Semantic parsing and ensures persistence."""
         logger.info(f"Building new index from documents in: {self.docs_folder_path}")
 
         try:
-            # 1. Cargar documentos (Forzamos extensión .md si ese es tu formato)
+            # 1. Load documents (Forcing .md extension if that's your format)
             documents = SimpleDirectoryReader(
                 self.docs_folder_path,
                 filename_as_id=True,
@@ -478,7 +486,7 @@ class ChatBot:
 
             logger.info(f"Found {len(documents)} documents. Starting Hybrid Parsing.")
 
-            # 2. Pipelines de Parseo
+            # 2. Parsing Pipelines
             markdown_parser = MarkdownNodeParser(include_metadata=True)
             text_splitter = SentenceSplitter(chunk_size=512, chunk_overlap=50)
 
@@ -486,31 +494,31 @@ class ChatBot:
                 transformations=[markdown_parser, text_splitter]
             )
 
-            # 3. Generar Nodos
+            # 3. Generate Nodes
             nodes = pipeline.run(documents=documents, show_progress=True)
             
-            # Filtrar nodos vacíos que rompen BM25
+            # Filter empty nodes that break BM25
             nodes = [n for n in nodes if n.get_content() and n.get_content().strip()]
             
             logger.info(f"Generated {len(nodes)} valid nodes for indexing.")
 
-            # 4. Añadir explícitamente al DocStore antes de indexar (Doble seguridad)
+            # 4. Explicitly add to DocStore before indexing (Double security)
             self.storage_context.docstore.add_documents(nodes)
 
-            # 5. Construir Índice Vectorial
+            # 5. Build Vector Index
             self.index = VectorStoreIndex(
                 nodes, 
                 storage_context=self.storage_context, 
                 show_progress=True
             )
 
-            # 6. Persistir TODO (Vectores + DocStore)
+            # 6. Persist EVERYTHING (Vectors + DocStore)
             self.index.storage_context.persist(persist_dir=self.embedding_storage_path)
             logger.info(f"New index built and persisted to {self.embedding_storage_path}")
 
         except Exception as e:
             logger.exception(f"Failed to build index: {e}")
-            # Crear índice vacío de emergencia para no tumbar la API
+            # Create an emergency empty index to avoid crashing the API
             self.index = VectorStoreIndex.from_documents([], storage_context=self.storage_context)
 
     def _setup_prompts(
@@ -567,10 +575,11 @@ class ChatBot:
         except Exception as e:
             logger.exception(f"Failed to set up query engine: {e}")
             raise RuntimeError(f"Query engine setup failed: {e}") from e
+
     def _log_query_details(self, query: str, response: str, context: str, user_id: int, task_id: str, input_tokens: Optional[int] = None, output_tokens: Optional[int] = None, embedding_tokens: Optional[int] = None):
         """Logs query, response, and context to separate files."""
         
-        diccionario = {
+        dictionary = {
             "user_id":user_id,
             "query":query,
             "response":response,
@@ -581,7 +590,7 @@ class ChatBot:
             'embedding_tokens': embedding_tokens,
         }
         
-        df = pd.DataFrame([diccionario])
+        df = pd.DataFrame([dictionary])
         if self.sql_engine:
             df.to_sql('query_chatbots_logs', self.sql_engine, if_exists='append', index=False)
         
@@ -606,19 +615,19 @@ class ChatBot:
             logger.error(f"Failed to log query details for timestamp {timestamp}: {e}")
 
     def _build_hybrid_retriever(self, use_async: bool):
-        """Construye el retriever híbrido (BM25 + Vectorial)."""
-        def spanish_tokenizer(text: str) -> List[str]:
+        """Builds the hybrid retriever (BM25 + Vectorial)."""
+        def custom_tokenizer(text: str) -> List[str]:
             return re.findall(r'\b\w+(?:-\w+)*\b', text.lower())
 
         try:
             if not self.index.docstore or len(self.index.docstore.docs) == 0:
-                raise ValueError("Docstore vacío")
+                raise ValueError("Empty docstore")
 
             vector_retriever = self.index.as_retriever(similarity_top_k=6)
             bm25_retriever = BM25Retriever.from_defaults(
                 docstore=self.index.docstore, 
                 similarity_top_k=6,
-                tokenizer=spanish_tokenizer 
+                tokenizer=custom_tokenizer 
             )
             
             return QueryFusionRetriever(
@@ -629,11 +638,11 @@ class ChatBot:
                 use_async=use_async
             )
         except Exception as e:
-            logger.warning(f"⚠️ Falló inicialización BM25 ({e}). Usando SOLO Vectorial.")
+            logger.warning(f"⚠️ BM25 initialization failed ({e}). Using ONLY Vectorial.")
             return self.index.as_retriever(similarity_top_k=6)
 
     def _build_chat_engine(self, retriever, user_memory) -> ContextChatEngine:
-        """Construye el motor de chat con su contexto y memoria."""
+        """Builds the chat engine with its context and memory."""
         return ContextChatEngine.from_defaults(
             retriever=retriever,
             memory=user_memory,
@@ -643,9 +652,9 @@ class ChatBot:
         )
 
     def _format_source_context(self, source_nodes, query_text: str):
-        """Extrae y formatea la información de los nodos fuente."""
+        """Extracts and formats information from source nodes."""
         source_nodes_data = []
-        context_str = f"Q Original: {query_text}\n\n\nFuentes:\n"
+        context_str = f"Original Q: {query_text}\n\n\nSources:\n"
         
         if source_nodes:
             for node in source_nodes:
@@ -653,8 +662,8 @@ class ChatBot:
                 score = node.score or 0.0
                 node_text = node.get_content(metadata_mode=MetadataMode.NONE)
                 
-                context_str += f"--- Archivo: {fname} (Score: {score:.4f}) ---\n"
-                context_str += f"Contenido:\n{node_text}\n\n"
+                context_str += f"--- File: {fname} (Score: {score:.4f}) ---\n"
+                context_str += f"Content:\n{node_text}\n\n"
                 
                 source_nodes_data.append({
                     "filename": os.path.basename(fname),
@@ -668,39 +677,39 @@ class ChatBot:
         return context_str, source_nodes_data
 
     def query(self, query_text: str, user_id: int, task_id: str) -> QueryResponse:
-        """Flujo Síncrono: Recuperación Híbrida -> Respuesta con Memoria."""
+        """Synchronous Flow: Hybrid Retrieval -> Response with Memory."""
         if not hasattr(self, 'index') or self.index is None:
-             return QueryResponse(response="Error: El índice no está inicializado.", context="", source_nodes=[], input_tokens=0, output_tokens=0)
+             return QueryResponse(response="Error: The index is not initialized.", context="", source_nodes=[], input_tokens=0, output_tokens=0)
 
         logger.info(f"Task {task_id}: Starting sync processing for user {user_id}")
 
-        # 1. Caché
+        # 1. Cache
         cached_response, cached_sources = self._check_cache(query_text)
         if cached_response:
-            # Reconstruimos un mini context_str para los logs
-            context_str = "Respuesta desde Caché\nFuentes recuperadas: " + ", ".join([s.get('filename', 'N/A') for s in (cached_sources or [])])
+            # Reconstruct a mini context_str for logs
+            context_str = "Response from Cache\nRetrieved sources: " + ", ".join([s.get('filename', 'N/A') for s in (cached_sources or [])])
             self._log_query_details(query_text, cached_response, context_str, user_id, task_id, 0, 0, 0)
             return QueryResponse(response=cached_response, context=context_str, source_nodes=cached_sources or [], input_tokens=0, output_tokens=0)
 
         try:
-            # 2. Preparar Componentes (Sync)
+            # 2. Prepare Components (Sync)
             retriever = self._build_hybrid_retriever(use_async=False)
             user_memory = self._get_memory_for_user(user_id)
             chat_engine = self._build_chat_engine(retriever, user_memory)
 
-            # 3. Ejecutar
+            # 3. Execute
             self.token_counter.reset_counts()
             response_obj = chat_engine.chat(query_text)
             response_text = str(response_obj)
 
-            # 4. Formatear
+            # 4. Format
             context_str, source_nodes_data = self._format_source_context(response_obj.source_nodes, query_text)
             
-            # Guardamos en caché AHORA, porque ya tenemos las fuentes
+            # Save to cache NOW, because we already have the sources
             if len(response_text) > 20 and "Error" not in response_text:
                 self._save_to_cache(query_text, response_text, source_nodes_data)
 
-            # Loguear
+            # Log
             input_tokens = self.token_counter.prompt_llm_token_count or 0
             output_tokens = self.token_counter.completion_llm_token_count or 0
             embedding_tokens = self.token_counter.total_embedding_token_count
@@ -716,30 +725,29 @@ class ChatBot:
             logger.exception(f"Error during query execution: {e}")
             return QueryResponse(response=f"Error during query: {e}", context="", source_nodes=[], input_tokens=0, output_tokens=0)
 
-
     async def stream_query(self, query_text: str, user_id: int, task_id: str):
-        """Flujo Asíncrono (Streaming): Recuperación Híbrida -> Respuesta con Memoria."""
+        """Asynchronous Flow (Streaming): Hybrid Retrieval -> Response with Memory."""
         if not hasattr(self, 'index') or self.index is None:
-            yield "Error: El índice no está inicializado."
+            yield "Error: The index is not initialized."
             return
 
         logger.info(f"Task {task_id}: Starting async processing for user {user_id}")
 
-        # 1. Caché
+        # 1. Cache
         cached_response, cached_sources = self._check_cache(query_text)
         if cached_response:
             yield cached_response
-            context_str = "Respuesta desde Caché\nFuentes recuperadas: " + ", ".join([s.get('filename', 'N/A') for s in (cached_sources or [])])
+            context_str = "Response from Cache\nRetrieved sources: " + ", ".join([s.get('filename', 'N/A') for s in (cached_sources or [])])
             self._log_query_details(query_text, cached_response, context_str, user_id, task_id, 0, 0, 0)
             return
 
         try:
-            # 2. Preparar Componentes (Async)
+            # 2. Prepare Components (Async)
             retriever = self._build_hybrid_retriever(use_async=True)
             user_memory = await self._get_memory_for_user_async(user_id)
             chat_engine = self._build_chat_engine(retriever, user_memory)
 
-            # 3. Ejecutar Streaming
+            # 3. Execute Streaming
             self.token_counter.reset_counts()
             streaming_response = await chat_engine.astream_chat(query_text)
 
@@ -748,10 +756,10 @@ class ChatBot:
                 full_response += token
                 yield token
             
-            # 4. Formatear y Loguear (Observa que aquí quitamos el "_")
+            # 4. Format and Log (Note that we removed the "_")
             context_str, source_nodes_data = self._format_source_context(streaming_response.source_nodes, query_text)
 
-            # Guardamos en el caché después de procesar y tener los nodos
+            # Save to cache after processing and having the nodes
             if len(full_response) > 20 and "Error" not in full_response:
                 self._save_to_cache(query_text, full_response, source_nodes_data)
             
@@ -763,7 +771,7 @@ class ChatBot:
 
         except Exception as e:
             logger.exception(f"Critical error in stream_query: {e}")
-            yield f"\n[Error del Sistema]: {str(e)}"
+            yield f"\n[System Error]: {str(e)}"
 
     # --- Document Management Methods ---
 
@@ -810,30 +818,30 @@ class ChatBot:
         
     def get_history(self, user_id: int) -> List[Dict[str, str]]:
         """
-        Recupera el historial de chat desde la Base de Datos para el frontend.
-        Esencial para que persista entre recargas y workers de Gunicorn.
+        Retrieves the chat history from the Database for the frontend.
+        Essential for it to persist between reloads and Gunicorn workers.
         """
         if not self.sql_engine:
             return []
         
         history = []
-        limit = 20 # Traer los últimos 20 mensajes (ajustable)
+        limit = 20 # Fetch the last 20 messages (adjustable)
 
         try:
-            # Consultamos query (usuario) y response (bot)
-            # Ordenamos por ID descendente para obtener los más recientes primero
+            # Query query (user) and response (bot)
+            # Order by ID descending to get the most recent first
             query = text("""
                 SELECT query, response 
                 FROM query_chatbots_logs
                 WHERE user_id = :uid and active = 1
-                ORDER BY fecha DESC
+                ORDER BY date DESC
                 LIMIT :limit
             """)
             
             with self.sql_engine.connect() as conn:
                 result = conn.execute(query, {"limit": limit, "uid": user_id}).fetchall()
 
-            # Invertimos para que el orden sea cronológico (antiguo -> nuevo)
+            # Reverse so the order is chronological (old -> new)
             for row in reversed(result):
                 if row.query:
                     history.append({"role": "user", "content": str(row.query)})
@@ -841,27 +849,26 @@ class ChatBot:
                     history.append({"role": "bot", "content": str(row.response)})
             
         except Exception as e:
-            logger.error(f"Error leyendo historial desde SQL: {e}")
+            logger.error(f"Error reading history from SQL: {e}")
             return []
 
         return history
 
     def clear_history(self, user_id: int):
-        """Borra el historial del usuario en la base de datos (Soft Delete o Hard Delete)."""
+        """Deletes the user's history in the database (Soft Delete or Hard Delete)."""
         if not self.sql_engine:
             return
 
         try:
-            # Opción B: Soft Delete (Si agregas una columna 'active' o 'deleted_at')
             query = text("UPDATE dbo.[query_chatbots_logs] SET active = 0 WHERE user_id = :uid")
             
             with self.sql_engine.begin() as conn:
                 conn.execute(query, {"uid": user_id})
             
-            logger.info(f"Historial SQL borrado para el usuario {user_id}")
+            logger.info(f"SQL history deleted for user {user_id}")
 
         except Exception as e:
-            logger.error(f"Error borrando historial en SQL: {e}")
+            logger.error(f"Error deleting history in SQL: {e}")
 
 # --- Specialized ChatBot for Edesur Context ---
 

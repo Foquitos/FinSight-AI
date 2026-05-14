@@ -36,7 +36,7 @@ def init_sqlite_db():
                     input_tokens INTEGER,
                     output_tokens INTEGER,
                     embedding_tokens INTEGER,
-                    fecha DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    date DATETIME DEFAULT CURRENT_TIMESTAMP,
                     active INTEGER DEFAULT 1
                 )
             """))
