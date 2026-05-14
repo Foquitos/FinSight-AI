@@ -1,0 +1,34 @@
+# ==========================================
+# Core Framework & Utilities
+# ==========================================
+llama-index-core
+pandas
+tiktoken
+pydantic_settings
+
+# ==========================================
+# LlamaIndex Integrations (Plugins)
+# ==========================================
+llama-index-llms-gemini
+llama-index-embeddings-google-genai
+llama-index-embeddings-huggingface
+llama-index-vector-stores-chroma
+llama-index-retrievers-bm25
+llama-index-readers-file
+
+# ==========================================
+# Google GenAI SDK (Official)
+# ==========================================
+google-genai
+
+# ==========================================
+# Vector Database & Retrieval
+# ==========================================
+chromadb
+sentence-transformers  # Requerido por SentenceTransformerRerank y HuggingFaceEmbedding
+
+# ==========================================
+# Database / SQL / ORM
+# ==========================================
+SQLAlchemy
+pyodbc  # Opcional/Recomendado: Asumiendo que usas SQL Server por la sintaxis [Mera].[pagina_web]
