@@ -5,6 +5,10 @@ llama-index-core
 pandas
 tiktoken
 pydantic_settings
+scikit-learn
+matplotlib
+seaborn
+numpy
 
 # ==========================================
 # LlamaIndex Integrations (Plugins)
@@ -25,10 +29,10 @@ google-genai
 # Vector Database & Retrieval
 # ==========================================
 chromadb
-sentence-transformers  # Requerido por SentenceTransformerRerank y HuggingFaceEmbedding
+sentence-transformers
 
 # ==========================================
 # Database / SQL / ORM
 # ==========================================
 SQLAlchemy
-pyodbc  # Opcional/Recomendado: Asumiendo que usas SQL Server por la sintaxis [Mera].[pagina_web]
+pyodbc
