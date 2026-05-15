@@ -4,3 +4,4 @@ app/services/Rag_llm/finsight_embeddings
 app/services/database/database.db
 **/__pycache__/
 **/logs/
+models/
