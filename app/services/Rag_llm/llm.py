@@ -148,7 +148,7 @@ class ChatBot:
             logger.error(f"Documents folder path '{self.docs_folder_path}' does not exist or is not a directory.")
             raise FileNotFoundError(f"Documents folder not found: {self.docs_folder_path}")
 
-        self._setup_logging(log_dir)
+        self.query_log_dir = os.path.join(log_dir, "queries")
         self._configure_llama_index_settings(
             remote_llm_model, remote_embed_model,
             reranker_model, reranker_top_n
@@ -328,17 +328,6 @@ class ChatBot:
             # Return empty memory in case of error to avoid breaking the flow
         
         return memory
-
-    def _setup_logging(self, log_dir: str):
-        """Sets up the directory for query-specific logs."""
-        self.query_log_dir = os.path.join(log_dir, "queries")
-        try:
-            os.makedirs(self.query_log_dir, exist_ok=True)
-            logger.info(f"Query logs will be saved in: {self.query_log_dir}")
-        except OSError as e:
-            logger.error(f"Failed to create query log directory '{self.query_log_dir}': {e}")
-            # Decide if this is fatal or not. For now, we'll log and continue.
-            self.query_log_dir = None # Disable query logging if dir creation fails
 
     def _configure_llama_index_settings(
         self, remote_llm_model: str,
@@ -576,7 +565,7 @@ class ChatBot:
             logger.exception(f"Failed to set up query engine: {e}")
             raise RuntimeError(f"Query engine setup failed: {e}") from e
 
-    def _log_query_details(self, query: str, response: str, context: str, user_id: int, task_id: str, input_tokens: Optional[int] = None, output_tokens: Optional[int] = None, embedding_tokens: Optional[int] = None):
+    def _log_query_details(self, query: str, response: str, context: str, user_id: int, task_id: str, input_tokens: Optional[int] = None, output_tokens: Optional[int] = None, embedding_tokens: Optional[int] = None, log_to_db: bool = True, log_to_files: bool = False):
         """Logs query, response, and context to separate files."""
         
         dictionary = {
@@ -591,28 +580,30 @@ class ChatBot:
         }
         
         df = pd.DataFrame([dictionary])
-        if self.sql_engine:
+        if self.sql_engine and log_to_db:
             df.to_sql('query_chatbots_logs', self.sql_engine, if_exists='append', index=False)
         
-        if not self.query_log_dir:
-            logger.warning("Query logging disabled because log directory setup failed.")
-            return
+        if log_to_files:
+            if not self.query_log_dir or not os.path.exists(self.query_log_dir):
+                os.makedirs(self.query_log_dir, exist_ok=True) if self.query_log_dir else None
+                logger.warning("Query logging disabled because log directory setup failed.")
+                return
 
-        try:
-            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S-%f')
-            base_filename = os.path.join(self.query_log_dir, f'{timestamp}')
+            try:
+                timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S-%f')
+                base_filename = os.path.join(self.query_log_dir, f'{timestamp}')
 
-            # Save query
-            with open(f'{base_filename}_query.txt', mode='w', encoding='utf-8') as f:
-                f.write(query)
-            # Save response
-            with open(f'{base_filename}_response.txt', mode='w', encoding='utf-8') as f:
-                f.write(response)
-            # Save context
-            with open(f'{base_filename}_context.txt', mode='w', encoding='utf-8') as f:
-                f.write(context)
-        except Exception as e:
-            logger.error(f"Failed to log query details for timestamp {timestamp}: {e}")
+                # Save query
+                with open(f'{base_filename}_query.txt', mode='w', encoding='utf-8') as f:
+                    f.write(query)
+                # Save response
+                with open(f'{base_filename}_response.txt', mode='w', encoding='utf-8') as f:
+                    f.write(response)
+                # Save context
+                with open(f'{base_filename}_context.txt', mode='w', encoding='utf-8') as f:
+                    f.write(context)
+            except Exception as e:
+                logger.error(f"Failed to log query details for timestamp {timestamp}: {e}")
 
     def _build_hybrid_retriever(self, use_async: bool):
         """Builds the hybrid retriever (BM25 + Vectorial)."""
