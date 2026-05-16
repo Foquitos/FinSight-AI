@@ -87,5 +87,21 @@ if __name__ == "__main__":
             Platinum membership who made 20 transactions last month in the Home
             category?"""
         ))
+        
+        print("\n--- TEST 4: Data Analysis Questions ---")
+        print(await orchestrator.achat(
+            """How many international transactions are in the dataset?"""
+        ))
+        
+        print("\n--- TEST 5: Data Analysis Questions ---")
+        print(await orchestrator.achat(
+            """How many transactions had more than 3 failed attempts in 24 hours?"""
+        ))
+        
+        print("\n--- TEST 6: Complex Analytical Questions: ---")
+        print(await orchestrator.achat(
+            """Which transactions look suspicious and why? Show me the top 5 with
+            explanations"""
+        ))
 
     asyncio.run(_run_tests())
