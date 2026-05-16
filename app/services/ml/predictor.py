@@ -39,6 +39,9 @@ class PurchasePredictor:
             "message": f"The predicted purchase amount for this profile is ${round(float(prediction), 2)}"
         }
 
+FraudPredictor_instance = FraudPredictor()
+PurchasePredictor_instance = PurchasePredictor()
+
 # Example usage 
 if __name__ == "__main__":
     fraud_predictor = FraudPredictor()
