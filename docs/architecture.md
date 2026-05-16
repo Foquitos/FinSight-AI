@@ -1,39 +1,313 @@
-# FinSight AI: Financial Agent Prototype
+# FinSight AI — Architecture & Design Document
 
 ## 1. Overview
-This project is a prototype of an AI-powered conversational assistant designed for financial fraud analysts. The system acts as an intelligent orchestrator capable of querying structured databases for data analysis, executing real-time Machine Learning inferences, and retrieving domain-specific financial knowledge (e.g., KYC, PCI DSS policies) using a Retrieval-Augmented Generation (RAG) pipeline.
+
+FinSight AI is a prototype conversational assistant for financial fraud analysts. The system was designed to answer three fundamentally different types of questions from a single natural-language interface:
+
+| Question type | Example | Mechanism |
+|---|---|---|
+| Data analysis | "How many international transactions are in the dataset?" | NL → SQL via LlamaIndex |
+| ML prediction | "Is this $1,250 transaction fraudulent?" | Serialized scikit-learn pipeline |
+| Policy knowledge | "What are the KYC requirements for high-risk customers?" | RAG over markdown documents |
+
+The core design challenge was integrating these three heterogeneous backends under a single agent that can route queries, chain tools when needed, and maintain conversational context.
+
+---
 
 ## 2. System Architecture
-The application follows a modular, tool-based architecture:
-* **Orchestrator (Agent):** The core LLM router that evaluates user intent and dispatches queries to the appropriate specialized tools.
-* **Knowledge Retrieval (RAG Module):** Processes financial Markdown documents to accurately answer policy and regulatory compliance questions.
-* **Predictive Analytics (ML Module):** Exposes serialized Scikit-Learn models to evaluate individual transactions for fraud risk and project customer purchase amounts.
-* **Structured Query (Data Module):** An interface to query the simulated database for aggregated historical patterns and data analysis.
 
-## 3. Model Selection & Performance
-### 3.1. Fraud Detection (Binary Classification)
-* **Model:** Random Forest Classifier.
-* **Rationale:** Selected for its robustness against non-linear relationships, native interpretability (Feature Importance), and minimal preprocessing requirements, making it ideal for rapid prototyping.
-* **Feature Engineering:** Created composite variables such as `failed_velocity_ratio` and `brute_force_warning` to capture real-world brute-force attack heuristics.
-* **Metrics:** * Recall: 1.00 (Cross-Validation). 
-  * *Context Note:* The perfect recall score is a byproduct of the synthetic and perfectly balanced nature (50% fraud / 50% legitimate) of the 100-row prototype dataset.
+### 2.1 High-level diagram
 
-### 3.2. Purchase Prediction (Regression)
-* **Model:** [PLACEHOLDER, e.g., Random Forest Regressor]
-* **Rationale:** [PLACEHOLDER]
-* **Metrics:** [PLACEHOLDER - e.g., MAE / RMSE]
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                          Client / API Consumer                       │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ HTTP
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                        FastAPI Application                           │
+│                                                                      │
+│   POST /api/v1/agent/chat          POST /api/v1/chatbot/chat        │
+│   POST /api/v1/chatbot/history     GET  /health                     │
+└───────────┬──────────────────────────────────┬──────────────────────┘
+            │                                  │
+            ▼                                  ▼
+┌───────────────────────┐          ┌───────────────────────────────────┐
+│   FinancialAgent       │          │   finsight (RAG Chatbot)          │
+│   (ReActAgent)         │          │                                   │
+│                        │          │  BM25 + Vector Hybrid Retrieval   │
+│  ┌─────────────────┐  │          │  SentenceTransformer Reranker     │
+│  │  Tool Router    │  │          │  Semantic Cache (3-day TTL)       │
+│  └────────┬────────┘  │          │  Per-user memory (SQLite)         │
+│           │            │          │  Streaming response               │
+└───────────│────────────┘          └───────────────────────────────────┘
+            │
+     ┌──────┼──────────────────────────────────┐
+     │      │                                  │
+     ▼      ▼                                  ▼
+┌─────────────────┐   ┌──────────────────┐   ┌───────────────────────┐
+│  Knowledge Base │   │  Data Analysis   │   │   ML Predictors       │
+│  Tool (RAG)     │   │  Tools (NL→SQL)  │   │                       │
+│                 │   │                  │   │  FraudPredictor       │
+│  ChromaDB       │   │  NLSQLTable      │   │  PurchasePredictor    │
+│  (vector store) │   │  QueryEngine     │   │  (.joblib artifacts)  │
+│                 │   │                  │   │                       │
+│  finsight_docs/ │   │  SQLite          │   │  Random Forest        │
+│  (20 md files)  │   │  (transactions + │   │  + custom sklearn     │
+│                 │   │   customers)     │   │    transformers       │
+└─────────────────┘   └──────────────────┘   └───────────────────────┘
+                                │
+                       ┌────────┘
+                       ▼
+              ┌─────────────────────┐
+              │  Google Gemini LLM  │
+              │  (gemini-3.1-flash- │
+              │   lite via LlamaIndex│
+              │   Settings.llm)     │
+              └─────────────────────┘
+```
 
-## 4. Key Insights Discovered
-* **Fraud Patterns:** Within this dataset, anomalous transactions are heavily dictated by the `merchant_risk_score` and discrepancies in shipping addresses (`shipping_address_match`).
-* **Data Distribution:** The provided dataset presents an unrealistic balance (50/50). In a real-world scenario, fraud datasets are highly imbalanced (typically <2% fraud), which significantly alters the training approach.
+### 2.2 Component responsibilities
 
-## 5. Design Decisions & Trade-offs
-* **Local vs. Cloud Deployment:** Adhering to the guideline of prioritizing documentation over costly deployments, components (LLM, Vector Store) are simulated and executed locally.
-* **Model Serialization:** To optimize agent latency, ML models are not trained at runtime. Instead, they are trained offline in notebooks (`.ipynb`) and exported as static artifacts (`.joblib`).
-* **Inference Column Alignment (Reindexing):** Implemented strict dataframe reindexing in the `Predictor` class. This ensures that missing categorical variables in single-transaction inferences do not break the One-Hot Encoding pipeline at runtime.
+**FastAPI + Uvicorn** — Provides two independent entry points: a tool-based agent endpoint and a streaming RAG chatbot endpoint with conversation history management.
 
-## 6. Future Improvements
-Given more time and resources, the system would be upgraded with:
-* **Cloud-Native Architecture:** Migrating the training pipeline to **Databricks** and utilizing MLflow for robust experiment tracking and model versioning.
-* **Handling Imbalanced Data:** Implementing synthetic oversampling techniques (like SMOTE) to prepare the classification pipeline for real-world, heavily skewed data distributions.
-* **Agent Memory:** Implementing short and long-term memory buffers in the orchestrator to maintain context across complex, multi-turn analytical conversations.
+**FinancialAgent (ReActAgent)** — LlamaIndex ReActAgent wrapper. Uses a financial system prompt to ground the LLM in the analyst domain. Dispatches to one or more tools per turn (max 10 iterations to prevent infinite loops). Exposes both async (`achat`) and sync (`chat`) interfaces.
+
+**finsight (RAG Chatbot)** — Specialized subclass of a generic `ChatBot` base. Handles streaming, per-user memory reconstruction from SQLite, and semantic caching. The two-stage retrieval (BM25 keyword + vector similarity → cross-encoder reranker) improves precision over pure vector search without sacrificing recall on keyword-heavy regulatory queries.
+
+**Agent Tools (5)** — Each tool is a self-contained function with a typed docstring that the ReActAgent uses as its tool schema:
+- `KnowledgeBaseTool` — Queries the ChromaDB index
+- `FraudDataAnalysisTool` — NL → SQL on `transactions` table
+- `PurchaseDataAnalysisTool` — NL → SQL on `customers` table
+- `FraudPredictionTool` — Calls `FraudPredictor.predict()`
+- `PurchasePredictionTool` — Calls `PurchasePredictor.predict()`
+
+**SQLite Database** — Three tables: `transactions` (fraud dataset), `customers` (purchase dataset), `query_chatbots_logs` (chat history + token usage). Using SQLite instead of an in-memory store lets the app reconstruct conversation history across multiple Uvicorn workers.
+
+---
+
+## 3. Data Flow
+
+### 3.1 Agent request (tool-based)
+
+```
+User query
+  → ReActAgent parses intent
+  → Selects tool(s) based on query type
+  → Tool executes (SQL / ML inference / RAG lookup)
+  → Agent synthesizes result into natural language
+  → Response returned to user
+```
+
+The agent can chain tools in a single turn. For example, a complex query like *"Analyze the top 5 suspicious transactions and explain the risk factors"* may trigger the fraud data analysis tool to retrieve records, then the fraud prediction tool to score each one, then the knowledge base tool to contextualize with policy language.
+
+### 3.2 RAG chatbot request (streaming)
+
+```
+User query + user_id
+  → Reconstruct conversation history from SQLite
+  → Semantic cache lookup (ChromaDB similarity)
+  → Cache miss → Hybrid retrieval (BM25 + vector)
+  → Cross-encoder reranker selects top-3 chunks
+  → LLM generates answer with retrieved context
+  → Response streamed token-by-token
+  → Result + tokens logged to SQLite
+```
+
+---
+
+## 4. Model Selection & Performance
+
+### 4.1 Fraud Detection — Binary Classification
+
+**Dataset:** `fraud_dataset.csv` — 100 transactions, 50% fraud / 50% legitimate (synthetic, balanced).
+
+**Model:** `RandomForestClassifier` (scikit-learn)
+
+**Rationale:**
+- **Interpretability:** Feature importance scores are natively available, which is critical in a fraud context where analysts need to understand *why* a transaction was flagged.
+- **Non-linear relationships:** Fraud signals (velocity, failed attempts, international flag) interact non-linearly in ways that tree ensembles capture well without manual interaction terms.
+- **Robustness:** Random Forest is resistant to outliers and requires minimal preprocessing, which accelerates prototyping and reduces the risk of pipeline bugs.
+- **Baseline quality:** For a 100-row synthetic dataset, a Random Forest with tuned hyperparameters provides a reliable baseline before moving to gradient boosting (XGBoost, LightGBM) on real data.
+
+**Custom feature engineering (`FraudFeatureEngineer` transformer):**
+
+| Feature | Formula | Captures |
+|---|---|---|
+| `failed_velocity_ratio` | `failed_transactions_24h / (transaction_velocity_24h + 1)` | Failure density relative to activity |
+| `velocity_failure_index` | `transaction_velocity_24h × failed_transactions_24h` | Magnitude of brute-force signal |
+| `brute_force_warning` | `1 if velocity ≥ 3 AND failures ≥ 2 else 0` | Binary heuristic flag |
+
+These features encode domain knowledge (brute-force attack patterns) directly into the pipeline, reducing the model's dependence on learning complex interactions from a small dataset.
+
+**Training setup:**
+- 80/20 stratified train/test split (`random_state=42`)
+- `GridSearchCV` with `cv=3`, optimizing for **Recall** (minimizing false negatives is the priority in fraud detection — missing a fraudulent transaction is more costly than a false alarm)
+- Hyperparameter grid: `n_estimators` ∈ {50, 100}, `max_depth` ∈ {None, 5, 10}, `min_samples_split` ∈ {2, 5}
+- `class_weight='balanced'` to handle any residual imbalance
+
+**Performance:**
+- Cross-validation Recall: **1.00** on training set
+
+> **Important caveat:** The perfect recall score reflects the synthetic, perfectly balanced nature of the 100-row dataset, not the model's real-world generalization ability. On a production dataset (typically <2% fraud rate, millions of rows), this model would require retraining with SMOTE or threshold calibration, and recall would drop to a realistic range. This prototype prioritizes demonstrating the *pipeline architecture* over validated model performance.
+
+---
+
+### 4.2 Purchase Amount Prediction — Regression
+
+**Dataset:** `product_purchase_dataset.csv` — 100 customer records, `purchase_amount` as continuous target.
+
+**Model:** `RandomForestRegressor` (scikit-learn)
+
+**Rationale:**
+- Same interpretability and robustness arguments as the classifier apply.
+- The dataset contains a mix of numeric features (age, income, loyalty points) and categorical features (membership tier, preferred category, payment method). Random Forest handles mixed types natively after encoding.
+- For a 100-row regression task, ensemble methods generalize better than linear models (which may underfit complex interactions) or deep networks (which overfit on small data).
+
+**Custom feature engineering (`IncomeBracketParser` transformer):**
+
+The raw `income_bracket` column stores string ranges like `"50K-100K"` or `"100K+"`. The custom transformer converts these to a single numeric estimate:
+- `"50K-100K"` → midpoint `75000`
+- `"100K+"` → `100000 × 1.2 = 120000` (configurable multiplier)
+- Single values parsed directly
+
+This avoids treating income brackets as unordered categorical values, which would lose the ordinal information.
+
+**Training setup:**
+- 80/20 train/test split (`random_state=42`)
+- `GridSearchCV` with `cv=5`, optimizing for **neg_mean_absolute_error** (MAE chosen over RMSE because purchase amounts don't have extreme outliers that would warrant penalizing large errors more heavily)
+- Hyperparameter grid: `n_estimators` ∈ {50, 100, 200}, `max_depth` ∈ {None, 10, 20}, `min_samples_split` ∈ {2, 5}, `min_samples_leaf` ∈ {1, 2}
+
+**Evaluation metrics computed on test set:**
+- Mean Absolute Error (MAE) — primary metric, same units as the target (USD)
+- Root Mean Squared Error (RMSE) — penalizes large prediction errors
+- R² Score — proportion of variance explained
+
+> The full metric output is available by running `notebooks/02_purchase_model_training.ipynb`.
+
+---
+
+## 5. RAG Pipeline Design
+
+### 5.1 Document processing
+
+The 20 financial markdown documents are parsed into sentence-level chunks using LlamaIndex's ingestion pipeline. Sentence-level chunking was chosen over fixed-size chunking because financial documents contain dense, self-contained statements (e.g., a single sentence defining a KYC threshold) that should not be split mid-thought.
+
+### 5.2 Two-stage retrieval
+
+```
+Query
+  ├── BM25 (keyword index)    ─┐
+  └── Vector similarity        ├─ Merge candidates
+       (BAAI/bge-small-en)    ─┘
+                │
+                ▼
+       CrossEncoder reranker
+       (ms-marco-MiniLM-L12-v2)
+                │
+                ▼
+       Top-3 chunks → LLM context
+```
+
+**Why hybrid?** Pure vector retrieval misses exact regulatory terms (e.g., "PCI DSS 3.2.1", "SAR filing threshold $10,000"). BM25 catches these keyword matches. The reranker then resolves conflicts and selects the most semantically relevant chunks from the combined candidate set.
+
+### 5.3 Semantic caching
+
+Before retrieval, each query is checked against previously answered queries using vector similarity. If a sufficiently similar query was answered within the last 3 days, the cached response is returned immediately — avoiding LLM inference costs entirely. This is particularly effective for a domain with repetitive regulatory questions.
+
+---
+
+## 6. Key Insights from the Data
+
+**Fraud dataset (`fraud_dataset.csv`):**
+- The dataset is synthetically balanced at 50% fraud / 50% legitimate. Real-world fraud rates are typically 0.1–2%, which fundamentally changes the modeling approach (threshold tuning, cost-sensitive learning, SMOTE become essential rather than optional).
+- The most predictive features align with known fraud heuristics: `merchant_risk_score`, `shipping_address_match` (address mismatch), `failed_transactions_24h`, and `is_international`. These are also the features that domain experts would flag manually, which validates the model's feature importance as interpretable.
+- The custom `brute_force_warning` flag (high velocity + high failures) reliably identifies credential-stuffing and card-testing patterns.
+
+**Purchase dataset (`product_purchase_dataset.csv`):**
+- Purchase amount correlates with membership tier (Platinum > Gold > Silver), income bracket, and transaction history depth — expected relationships that confirm the dataset is realistic.
+- The `income_bracket` column required custom parsing because string ranges carry ordinal information that standard One-Hot Encoding would destroy.
+
+---
+
+## 7. Design Decisions & Trade-offs
+
+### Local vs. cloud deployment
+
+**Decision:** All components run locally — SQLite instead of a managed database, ChromaDB persisted to disk instead of a cloud vector store, Gemini API calls instead of a self-hosted LLM.
+
+**Trade-off:** This eliminates cloud costs and deployment complexity for a prototype, but creates scalability ceilings. A production system would use:
+- Databricks for training pipelines and MLflow for experiment tracking
+- A managed vector database (Pinecone, Weaviate, or Databricks Vector Search)
+- A serverless API layer (AWS Lambda / Azure Functions) for auto-scaling
+
+### Model serialization at init time
+
+**Decision:** ML models are trained offline in Jupyter notebooks and serialized as `.joblib` artifacts. The API loads them once at startup.
+
+**Trade-off:** This eliminates training latency from inference (critical for a real-time agent) and makes inference deterministic. The downside is that model updates require re-running notebooks and redeploying the artifact — no online learning capability.
+
+### Per-user memory in SQLite
+
+**Decision:** Conversation history is stored in `query_chatbots_logs` and reconstructed per request from SQLite, rather than held in memory.
+
+**Trade-off:** This makes the system stateless at the worker level, safe to run with multiple Uvicorn workers, and resilient to restarts. The cost is a database read on every chatbot request. For high-concurrency production use, this would be replaced with Redis or a similar in-memory cache.
+
+### ReActAgent with max_iterations=10
+
+**Decision:** The agent is capped at 10 tool calls per turn.
+
+**Trade-off:** Prevents infinite reasoning loops and controls API cost, but may truncate genuinely complex multi-step analyses. The cap was set empirically — in practice, the agent resolves most queries in 2–4 tool calls.
+
+### Two separate entry points (agent vs. chatbot)
+
+**Decision:** The agent endpoint (`/api/v1/agent/chat`) and the RAG chatbot endpoint (`/api/v1/chatbot/*`) are kept separate rather than unified.
+
+**Rationale:** The agent is stateless and tool-heavy (suited for analytical queries). The chatbot is streaming and context-aware (suited for conversational policy Q&A). Merging them would force unnecessary complexity into both. A future version could expose a single endpoint that internally routes based on query intent.
+
+---
+
+## 8. Future Improvements
+
+Given more time and production requirements, the following upgrades would have the highest impact:
+
+### Immediate (next sprint)
+
+1. **SMOTE for imbalanced data** — The fraud model needs to be validated on realistic class distributions. Implementing `imbalanced-learn`'s SMOTE in the training pipeline and calibrating the classification threshold (not just optimizing recall) is the highest-priority model improvement.
+
+2. **Actual metric benchmarking** — Run both notebooks against a holdout set and log metrics (classification report, ROC-AUC for fraud; MAE, RMSE, R² for purchase) to MLflow or a simple JSON artifact. The current architecture.md documents methodology but not final numbers.
+
+3. **Input validation on ML tools** — The prediction tools currently accept free-text parameters that the LLM extracts. Adding Pydantic schema validation with sensible defaults and range checks would prevent inference errors on edge-case inputs.
+
+### Medium-term (production readiness)
+
+4. **Databricks migration** — Move training pipelines to Databricks notebooks with MLflow experiment tracking. Use Delta Lake for the transaction and customer datasets to support versioned, auditable data updates. Register models in MLflow Model Registry with staging/production environments.
+
+5. **Real-time feature store** — Replace the static CSV-loaded SQLite tables with a streaming feature store (Databricks Feature Store or Feast) that ingests live transaction events via Kafka or Event Hubs. This enables genuine real-time fraud scoring rather than batch inference.
+
+6. **Agent long-term memory** — Implement a memory module (e.g., LlamaIndex `VectorMemory`) that stores key facts extracted from past conversations (customer risk profiles, analyst notes) and retrieves them on subsequent turns. This would let the agent say "You asked about CUST7823 last week — their risk profile has changed."
+
+7. **Evaluation harness** — Build an automated eval suite that runs the agent against a fixed set of benchmark queries (data analysis, prediction, knowledge) and checks response correctness. This is essential for catching regressions when the LLM or retrieval parameters change.
+
+### Long-term (scale)
+
+8. **Fraud model retraining pipeline** — Implement a drift detector (e.g., Evidently AI) that monitors incoming transaction distributions and triggers a retraining job in Databricks when feature drift exceeds a threshold.
+
+9. **Explainability layer** — Add SHAP value computation to the `FraudPredictor` output so analysts receive not just a fraud probability but the specific features that drove the score (e.g., "international flag contributed +0.34 to fraud probability").
+
+10. **Multi-modal input** — Extend the agent to accept document uploads (transaction reports, customer statements) and process them through the ingestion pipeline on the fly, rather than relying solely on pre-indexed documents.
+
+---
+
+## 9. Technology Choices Summary
+
+| Component | Choice | Alternative considered | Reason for choice |
+|---|---|---|---|
+| API framework | FastAPI | Flask, Django REST | Async-native, automatic schema docs, minimal boilerplate |
+| LLM | Google Gemini (flash-lite) | OpenAI GPT-4o-mini | Free tier sufficient for prototype; multimodal capability for future |
+| Agent framework | LlamaIndex ReActAgent | LangChain AgentExecutor | Tighter LlamaIndex integration with query engines and RAG indices |
+| Embeddings | BAAI/bge-small-en-v1.5 | OpenAI text-embedding-3-small | Runs locally, no API cost, strong benchmark performance for its size |
+| Reranker | ms-marco-MiniLM-L12-v2 | Cohere Rerank | Runs locally, no API cost, cross-encoder quality for free |
+| Vector store | ChromaDB | Pinecone, Weaviate | Zero infrastructure, persisted to disk, Python-native |
+| Database | SQLite | PostgreSQL | No infrastructure needed, sufficient for prototype concurrency |
+| ML framework | scikit-learn | XGBoost, LightGBM | Simpler pipeline API, sufficient for 100-row datasets, joblib-native |
