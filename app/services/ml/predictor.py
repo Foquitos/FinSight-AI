@@ -1,12 +1,31 @@
+import sys
 import pandas as pd
 import joblib
 import os
+import app.services.ml.transformers as _transformers_module
 from app.services.ml.transformers import IncomeBracketParser, FraudFeatureEngineer
+
+
+def _load_model(path: str):
+    # Models were pickled while transformers.py ran as __main__, so custom
+    # classes (FraudFeatureEngineer, IncomeBracketParser) are stored under
+    # the '__main__' module name. Temporarily remap __main__ so joblib can
+    # find them when loading outside that context (e.g. under uvicorn).
+    original_main = sys.modules.get("__main__")
+    sys.modules["__main__"] = _transformers_module  # type: ignore[assignment]
+    try:
+        return joblib.load(path)
+    finally:
+        if original_main is not None:
+            sys.modules["__main__"] = original_main
+        else:
+            sys.modules.pop("__main__", None)
+
 
 class FraudPredictor:
     def __init__(self):
         model_path = 'app/services/models/fraud_pipeline.joblib'
-        self.model = joblib.load(model_path)
+        self.model = _load_model(model_path)
 
     def predict(self, transaction_data: dict) -> dict:
         df_input = pd.DataFrame([transaction_data])
@@ -24,7 +43,7 @@ class FraudPredictor:
 class PurchasePredictor:
     def __init__(self):
         model_path = 'app/services/models/purchase_predictor.joblib'
-        self.model = joblib.load(model_path)
+        self.model = _load_model(model_path)
 
     def predict(self, customer_data: dict) -> dict:
         df_input = pd.DataFrame([customer_data])
