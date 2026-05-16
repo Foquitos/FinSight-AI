@@ -128,7 +128,7 @@ def predict_transaction_fraud(
         result = FraudPredictor_instance.predict(baseline_data)
         
         status = "Fraudulent" if result.get('is_fraud', False) else "Legitimate"
-        probability = result.get('probability', 0.0) * 100
+        probability = result.get('fraud_probability', 0.0) * 100
         
         return f"Prediction Result: The transaction appears to be {status} with a fraud probability of {probability:.2f}%."
     except Exception as e:
@@ -201,7 +201,8 @@ def predict_customer_purchase(
         baseline_data["preferred_category"] = preferred_category.lower()
     
     try:
-        predicted_amount = PurchasePredictor_instance.predict(baseline_data)
+        prediction_result = PurchasePredictor_instance.predict(baseline_data)
+        predicted_amount = prediction_result.get("predicted_purchase_amount", 0.0)
         
         return f"Prediction Result: The expected purchase amount for this customer profile is ${predicted_amount:.2f}."
     except Exception as e:

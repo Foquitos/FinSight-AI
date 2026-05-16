@@ -9,6 +9,8 @@ scikit-learn
 matplotlib
 seaborn
 numpy
+polars
+mistralai
 
 # ==========================================
 # LlamaIndex Integrations (Plugins)

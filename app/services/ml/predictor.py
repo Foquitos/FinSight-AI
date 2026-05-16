@@ -5,8 +5,7 @@ from app.services.ml.transformers import IncomeBracketParser, FraudFeatureEngine
 
 class FraudPredictor:
     def __init__(self):
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        model_path = os.path.join(current_dir, '../models/fraud_pipeline.joblib')
+        model_path = 'app/services/models/fraud_pipeline.joblib'
         self.model = joblib.load(model_path)
 
     def predict(self, transaction_data: dict) -> dict:
@@ -24,8 +23,7 @@ class FraudPredictor:
 
 class PurchasePredictor:
     def __init__(self):
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        model_path = os.path.join(current_dir, '../models/purchase_predictor.joblib')
+        model_path = 'app/services/models/purchase_predictor.joblib'
         self.model = joblib.load(model_path)
 
     def predict(self, customer_data: dict) -> dict:

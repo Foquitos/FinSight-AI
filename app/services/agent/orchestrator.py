@@ -1,16 +1,20 @@
-from llama_index.core.agent import ReActAgent
-from llama_index.core import Settings
-from app.services.agent.tools import agent_tools
+import asyncio
 import logging
+
+from llama_index.core import Settings
+from llama_index.core.agent.workflow import ReActAgent
+
+from app.services.ml.transformers import FraudFeatureEngineer, IncomeBracketParser
+from app.services.agent.tools import agent_tools
 
 logger = logging.getLogger(__name__)
 
+
 class FinancialAgent:
     """
-    Orchestrator class that initializes the ReAct Agent with the 
-    necessary tools for the fraud analyst.
+    Orchestrator that wraps the workflow-based ReActAgent for the fraud analyst.
     """
-    
+
     SYSTEM_PROMPT = """You are an advanced AI Financial Assistant designed for fraud analysts at Lovelytics.
 Your goal is to answer complex questions by breaking them down and using the appropriate tools.
 
@@ -30,49 +34,58 @@ Rules:
 
     def __init__(self):
         logger.info("Initializing the ReAct Financial Agent...")
-        
-        # Ensure the global LLM (Gemini) is configured in LlamaIndex
+
         if not Settings.llm:
             raise ValueError("Global LLM is not configured. Ensure LlamaIndex is initialized first.")
-            
-        # Create the Agent
-        self.agent = ReActAgent.from_tools( # type: ignore[reportAttributeAccessIssue]
+
+        self.agent = ReActAgent(
             tools=agent_tools,
             llm=Settings.llm,
             system_prompt=self.SYSTEM_PROMPT,
-            verbose=True, # Crucial: Shows the Thought, Action, Observation process
-            max_iterations=10 # Prevents infinite loops
+            verbose=False,
+            max_iterations=10,
         )
-        
-    def chat(self, user_query: str) -> str:
-        """
-        Main method to communicate with the agent.
-        """
+        self._loop = asyncio.new_event_loop()
+
+    async def achat(self, user_query: str) -> str:
+        """Async entry point — preferred."""
         logger.info(f"Processing user query: {user_query}")
         try:
-            response = self.agent.chat(user_query)
+            handler = self.agent.run(user_query)
+            response = await handler
             return str(response)
         except Exception as e:
             logger.error(f"Error during agent execution: {e}")
-            return f"I'm sorry, an error occurred while processing the request: {str(e)}"
+            return f"I'm sorry, an error occurred while processing the request: {e}"
+
+    def chat(self, user_query: str) -> str:
+        """Sync wrapper for environments that aren't async."""
+        return self._loop.run_until_complete(self.achat(user_query))
+
 
 # ==========================================
 # Helper function for quick testing
 # ==========================================
 if __name__ == "__main__":
-    # Import your main config settings here to ensure Gemini is ready
-    # from app.config import settings
-    
-    orchestrator = FinancialAgent()
-    
-    print("\n--- TEST 1: Theoretical Question (Should use RAG) ---")
-    response_1 = orchestrator.chat("What are the common indicators of credit card fraud?")
-    print(response_1)
-    
-    print("\n--- TEST 2: ML Prediction (Should use tool_fraud_prediction) ---")
-    response_2 = orchestrator.chat("Predict if this transaction is fraudulent: $1,250 purchase at electronics store, international, 3am, from a 2-month-old account.")
-    print(response_2)
+    from app.config import settings 
 
-    print("\n--- TEST 3: Purchase Prediction (Should use tool_purchase_prediction) ---")
-    response_3 = orchestrator.chat("Predict the purchase amount for this customer: $500 purchase at clothing store, domestic, 2pm, from a 1-year-old account.")
-    print(response_3)
+    async def _run_tests():
+        orchestrator = FinancialAgent()
+
+        print("\n--- TEST 1: Theoretical Question (Should use RAG) ---")
+        print(await orchestrator.achat("What are the common indicators of credit card fraud?"))
+
+        print("\n--- TEST 2: ML Prediction (Should use tool_fraud_prediction) ---")
+        print(await orchestrator.achat(
+            "Predict if this transaction is fraudulent: $1,250 purchase at electronics store, "
+            "international, 3am, from a 2-month-old account."
+        ))
+
+        print("\n--- TEST 3: Purchase Prediction (Should use tool_purchase_prediction) ---")
+        print(await orchestrator.achat(
+            """What's the expected purchase amount for a 45-year-old customer with
+            Platinum membership who made 20 transactions last month in the Home
+            category?"""
+        ))
+
+    asyncio.run(_run_tests())
