@@ -88,6 +88,8 @@ FinSight-AI/
 │   ├── config.py             # Pydantic settings + LlamaIndex init
 │   ├── main.py               # FastAPI app + lifespan
 │   └── schemas.py            # Request/response models
+├── frontend/
+│   └── index.html            # Single-page chat UI (served at GET /)
 ├── data/
 │   ├── fraud_dataset.csv
 │   ├── product_purchase_dataset.csv
@@ -142,8 +144,23 @@ source .venv/bin/activate     # Linux / macOS
 uvicorn app.main:app --reload
 ```
 
-The API will be available at `http://localhost:8000`.
-Interactive documentation (Swagger UI): `http://localhost:8000/docs`.
+The API will be available at `http://localhost:8000` or your respectively-named IP address/domain name.
+Interactive documentation (Swagger UI): `http://localhost:8000/docs` or your respectively-named IP address/domain name.
+
+---
+
+## Web interface
+
+Once the server is running, open **http://localhost:8000** or your respectively-named IP address/domain name, in a browser to access the chat UI — no extra setup required.
+
+The interface exposes both backends through two tabs:
+
+| Tab | Endpoint | Behaviour |
+|---|---|---|
+| ⚡ Agent | `POST /api/v1/agent/chat` | Tool-based reasoning: fraud detection, ML predictions, SQL data queries |
+| 📚 Chatbot | `POST /api/v1/chatbot/chat` | RAG streaming: policy questions, KYC, AML, PCI DSS compliance |
+
+Each tab includes ready-to-use example prompts so you can explore the system immediately after startup. Responses are rendered as Markdown and the Chatbot tab streams tokens in real time.
 
 ---
 

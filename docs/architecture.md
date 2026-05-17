@@ -20,15 +20,18 @@ The core design challenge was integrating these three heterogeneous backends und
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                          Client / API Consumer                       │
+│              Browser — FinSight UI  (GET /)                          │
+│    Single-page HTML  ·  ⚡ Agent tab  ·  📚 Chatbot tab (streaming) │
 └──────────────────────────────┬──────────────────────────────────────┘
-                               │ HTTP
+                               │ HTTP / Fetch  (streaming for chatbot)
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        FastAPI Application                           │
 │                                                                      │
+│   GET  /                           (serves frontend/index.html)     │
 │   POST /api/v1/agent/chat          POST /api/v1/chatbot/chat        │
-│   POST /api/v1/chatbot/history     GET  /health                     │
+│   GET  /api/v1/chatbot/history     POST /api/v1/chatbot/clear-…     │
+│   GET  /health                                                       │
 └───────────┬──────────────────────────────────┬──────────────────────┘
             │                                  │
             ▼                                  ▼
@@ -69,7 +72,13 @@ The core design challenge was integrating these three heterogeneous backends und
 
 ### 2.2 Component responsibilities
 
-**FastAPI + Uvicorn** — Provides two independent entry points: a tool-based agent endpoint and a streaming RAG chatbot endpoint with conversation history management.
+**Frontend (`frontend/index.html`)** — Self-contained single-page app served by FastAPI at `GET /`. No build step or separate server is required. Implements two tabs backed by different endpoints:
+- **⚡ Agent tab** — sends `POST /api/v1/agent/chat` and renders the JSON response as Markdown.
+- **📚 Chatbot tab** — sends `POST /api/v1/chatbot/chat` and reads the `text/plain` stream token-by-token, progressively rendering Markdown as it arrives.
+
+Both tabs expose pre-filled example prompts for quick exploration and auto-resize the input textarea. Markdown rendering uses `marked.js` (CDN, pinned to v9).
+
+**FastAPI + Uvicorn** — Provides the frontend file and two independent API entry points: a tool-based agent endpoint and a streaming RAG chatbot endpoint with conversation history management.
 
 **FinancialAgent (ReActAgent)** — LlamaIndex ReActAgent wrapper. Uses a financial system prompt to ground the LLM in the analyst domain. Dispatches to one or more tools per turn (max 10 iterations to prevent infinite loops). Exposes both async (`achat`) and sync (`chat`) interfaces.
 
