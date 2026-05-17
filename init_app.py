@@ -27,7 +27,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 # ── Pretty-print helpers ───────────────────────────────────────────────────────
 
 def _sep():
-    print("─" * 62)
+    print("-" * 62)
 
 def header(text: str):
     print()
@@ -36,7 +36,7 @@ def header(text: str):
     _sep()
 
 def ok(text: str):    print(f"  [OK]  {text}")
-def info(text: str):  print(f"  [ → ] {text}")
+def info(text: str):  print(f"  [ -> ] {text}")
 def warn(text: str):  print(f"  [!]   {text}")
 def fail(text: str):  print(f"  [ERR] {text}", file=sys.stderr)
 
