@@ -108,7 +108,9 @@ FinSight-AI/
 
 ## Prerequisites
 
-- Python 3.10 or higher
+- **Python 3.10 – 3.13** (3.12 recommended). Newer versions such as 3.14 are
+  not supported yet — the ML dependencies have no pre-built wheels for them.
+  See [Troubleshooting](#troubleshooting).
 - A [Google Gemini API key](https://aistudio.google.com/app/apikey)
 
 ---
@@ -130,6 +132,53 @@ The script walks through 7 steps:
 5. Dataset loading (CSV → SQLite)
 6. ML model training (Random Forest with GridSearchCV)
 7. RAG index building (markdown docs → ChromaDB)
+
+---
+
+## Troubleshooting
+
+### `pip install` fails while building pandas / numpy (Step 3)
+
+**Symptoms** — `init_app.py` aborts during **Step 3** with errors such as:
+
+```
+..\..\meson.build:2:0: ERROR: Could not find C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe
+error: metadata-generation-failed
+subprocess.CalledProcessError: ... pip ... install -r requirements.txt ... returned non-zero exit status 1.
+```
+
+**Cause** — you are running an **unsupported Python version** (e.g. 3.14).
+Pandas, NumPy and scikit-learn only publish pre-built wheels for released
+Python versions. On a newer Python, pip tries to compile them from source,
+which requires a C/C++ toolchain (Visual Studio Build Tools on Windows) and
+fails on a machine that doesn't have one.
+
+**Fix** — use Python 3.10–3.13 (3.12 recommended):
+
+1. Install Python 3.12 from [python.org](https://www.python.org/downloads/).
+2. Delete the broken virtual environment created by the wrong Python — the
+   setup script reuses an existing `.venv/` and would otherwise install into
+   the bad one again:
+
+   ```bash
+   # Windows (PowerShell)
+   Remove-Item -Recurse -Force .venv
+   # Linux / macOS
+   rm -rf .venv
+   ```
+
+3. Re-run the setup with Python 3.12 **explicitly**, so the new `.venv/` is
+   created with it even if a newer Python is also installed:
+
+   ```bash
+   # Windows
+   py -3.12 init_app.py
+   # Linux / macOS
+   python3.12 init_app.py
+   ```
+
+`init_app.py` refuses to run on unsupported Python versions and prints these
+same instructions.
 
 ---
 

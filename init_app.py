@@ -43,13 +43,38 @@ def fail(text: str):  print(f"  [ERR] {text}", file=sys.stderr)
 
 # ── Step 1 — Python version ────────────────────────────────────────────────────
 
+# Supported Python range. The upper bound matters: the heavy ML dependencies
+# (pandas, numpy, scikit-learn, torch, chromadb) only publish pre-built wheels
+# for released Python versions. On a newer, unsupported Python, pip falls back
+# to compiling them from source, which needs a C/C++ toolchain (Visual Studio
+# Build Tools on Windows) and almost always fails on a fresh machine.
+MIN_PYTHON = (3, 10)
+MAX_PYTHON = (3, 13)  # inclusive — newest version with wheels for all deps
+
+
 def check_python():
     header("Step 1 · Checking Python version")
     v = sys.version_info
-    if v < (3, 10):
-        fail(f"Python 3.10+ is required. Detected: {v.major}.{v.minor}.{v.micro}")
+    current = f"{v.major}.{v.minor}.{v.micro}"
+
+    if (v.major, v.minor) < MIN_PYTHON:
+        fail(f"Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ is required. Detected: {current}")
         sys.exit(1)
-    ok(f"Python {v.major}.{v.minor}.{v.micro}")
+
+    if (v.major, v.minor) > MAX_PYTHON:
+        fail(f"Unsupported Python version: {current}")
+        fail(f"This project supports Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} "
+             f"through {MAX_PYTHON[0]}.{MAX_PYTHON[1]} (3.12 recommended).")
+        fail("Newer versions have no pre-built wheels for pandas/numpy/scikit-learn,")
+        fail("so pip would compile them from source and fail without a C/C++")
+        fail("compiler (Visual Studio Build Tools on Windows).")
+        fail("Fix: install Python 3.12, delete the existing .venv/ folder, and")
+        fail("re-run this script with that interpreter explicitly:")
+        fail("  Windows:       py -3.12 init_app.py")
+        fail("  Linux / macOS: python3.12 init_app.py")
+        sys.exit(1)
+
+    ok(f"Python {current}")
 
 
 # ── Step 2 — Virtual environment ───────────────────────────────────────────────
