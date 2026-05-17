@@ -158,6 +158,16 @@
 
     .hint { font-size: 0.72rem; color: var(--muted); margin-top: 7px; text-align: right; }
 
+    /* ── Clear button ────────────────────────────── */
+    #clear-btn {
+      background: transparent; border: 1px solid var(--border); border-radius: 8px;
+      width: 34px; height: 34px; cursor: pointer; color: var(--muted);
+      display: flex; align-items: center; justify-content: center;
+      transition: border-color 0.15s, color 0.15s;
+      flex-shrink: 0;
+    }
+    #clear-btn:hover { border-color: #f87171; color: #f87171; }
+
     /* ── Error toast ─────────────────────────────── */
     .error-text { color: #f87171; }
   </style>
@@ -170,9 +180,16 @@
       <div class="logo-icon">💡</div>
       FinSight AI
     </div>
-    <div class="mode-tabs">
-      <button class="mode-tab active" data-mode="agent"   onclick="setMode('agent')">⚡ Agent</button>
-      <button class="mode-tab"        data-mode="chatbot" onclick="setMode('chatbot')">📚 Chatbot</button>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <div class="mode-tabs">
+        <button class="mode-tab active" data-mode="agent"   onclick="setMode('agent')">⚡ Agent</button>
+        <button class="mode-tab"        data-mode="chatbot" onclick="setMode('chatbot')">📚 Chatbot</button>
+      </div>
+      <button id="clear-btn" title="Clear conversation history" onclick="clearHistory()">
+        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>
+        </svg>
+      </button>
     </div>
   </header>
 
@@ -240,15 +257,10 @@ function setMode(m) {
   document.querySelectorAll('.mode-tab').forEach(t => t.classList.toggle('active', t.dataset.mode === m));
 
   const w = WELCOME[m];
-  const titleEl = document.getElementById('welcome-title');
-  const descEl  = document.getElementById('welcome-desc');
-  if (titleEl) titleEl.textContent = w.title;
-  if (descEl)  descEl.textContent  = w.desc;
-
   document.getElementById('query').placeholder = w.placeholder;
   document.getElementById('send-btn').style.background = m === 'agent' ? 'var(--accent)' : 'var(--accent-rag)';
   document.getElementById('input-row').classList.toggle('rag', m === 'chatbot');
-  renderSuggestions();
+  loadHistory();
 }
 
 function renderSuggestions() {
@@ -268,6 +280,54 @@ function renderSuggestions() {
 function hideWelcome() {
   const el = document.getElementById('welcome');
   if (el) el.remove();
+}
+
+function showWelcome() {
+  const wrap = document.getElementById('messages');
+  wrap.innerHTML = '';
+  const w = WELCOME[mode];
+  const welcome = document.createElement('div');
+  welcome.className = 'welcome';
+  welcome.id = 'welcome';
+  welcome.innerHTML = `
+    <div class="welcome-icon">💡</div>
+    <h2>${w.title}</h2>
+    <p>${w.desc}</p>
+    <div class="suggestions" id="suggestions"></div>
+  `;
+  wrap.appendChild(welcome);
+  renderSuggestions();
+}
+
+// Loads the conversation the active backend currently keeps in context.
+// Guarded with a token so rapid tab switches don't render stale history.
+let historyLoadId = 0;
+async function loadHistory() {
+  const myLoad = ++historyLoadId;
+  const url = mode === 'agent'
+    ? '/api/v1/agent/history/1'
+    : '/api/v1/chatbot/history/1';
+
+  let history = [];
+  try {
+    const res = await fetch(url);
+    if (res.ok) history = (await res.json()).history || [];
+  } catch (_) { /* offline → fall back to welcome */ }
+
+  if (myLoad !== historyLoadId) return;  // a newer load superseded this one
+
+  if (!history.length) { showWelcome(); return; }
+
+  const wrap = document.getElementById('messages');
+  wrap.innerHTML = '';
+  history.forEach(m => {
+    if (m.role === 'user') {
+      appendUserBubble(m.content);
+    } else {
+      renderMd(appendBotBubble(), m.content);
+    }
+  });
+  scrollBottom();
 }
 
 function appendUserBubble(text) {
@@ -352,6 +412,18 @@ async function send() {
   }
 }
 
+// ── Clear history ────────────────────────────────────────
+async function clearHistory() {
+  const url = mode === 'agent'
+    ? '/api/v1/agent/clear-history/1'
+    : '/api/v1/chatbot/clear-history/1';
+  try {
+    await fetch(url, { method: 'POST' });
+  } catch (_) { /* ignore network errors on clear */ }
+
+  showWelcome();
+}
+
 // ── Agent ────────────────────────────────────────────────
 async function callAgent(text) {
   appendTypingIndicator();
@@ -359,7 +431,7 @@ async function callAgent(text) {
     const res = await fetch('/api/v1/agent/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: text }),
+      body: JSON.stringify({ query: text, user_id: 1 }),
     });
     removeTypingIndicator();
     const bubble = appendBotBubble();
@@ -434,7 +506,7 @@ document.getElementById('query').addEventListener('keydown', function (e) {
 document.getElementById('send-btn').addEventListener('click', send);
 
 // ── Init ─────────────────────────────────────────────────
-renderSuggestions();
+loadHistory();
 document.getElementById('query').focus();
 </script>
 </body>

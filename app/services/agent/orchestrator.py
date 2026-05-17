@@ -1,8 +1,15 @@
 import asyncio
 import logging
+from typing import Optional
+
+import sqlalchemy
+from sqlalchemy import text
 
 from llama_index.core import Settings
 from llama_index.core.agent.workflow import ReActAgent
+from llama_index.core.workflow import Context
+from llama_index.core.memory import ChatMemoryBuffer
+from llama_index.core.llms import ChatMessage, MessageRole
 
 from app.services.ml.transformers import FraudFeatureEngineer, IncomeBracketParser
 from app.services.agent.tools import agent_tools
@@ -13,10 +20,12 @@ logger = logging.getLogger(__name__)
 class FinancialAgent:
     """
     Orchestrator that wraps the workflow-based ReActAgent for the fraud analyst.
+    Maintains per-user conversation context so the agent behaves like a chatbot.
     """
 
     SYSTEM_PROMPT = """You are an advanced AI Financial Assistant designed for fraud analysts at Lovelytics.
-Your goal is to answer complex questions by breaking them down and using the appropriate tools.
+You maintain the full conversation history of each session and can refer to previous exchanges
+when answering follow-up questions (e.g. "what about that transaction?" or "explain further").
 
 You have access to:
 1. Knowledge Base Tool: For reading documentation about financial policies, KYC, AML, and PCI DSS.
@@ -32,7 +41,10 @@ Rules:
 - Be precise, analytical, and professional.
 """
 
-    def __init__(self):
+    # How many previous turns to replay into the agent's working memory.
+    HISTORY_LIMIT = 20
+
+    def __init__(self, sql_engine: Optional[sqlalchemy.engine.base.Engine] = None):
         logger.info("Initializing the ReAct Financial Agent...")
 
         if not Settings.llm:
@@ -45,22 +57,127 @@ Rules:
             verbose=False,
             max_iterations=10,
         )
+        self.sql_engine = sql_engine
+        # Per-user workflow contexts — each Context holds the live conversation
+        # memory. The source of truth across restarts is the agent_logs table.
+        self._user_contexts: dict[int, Context] = {}
         self._loop = asyncio.new_event_loop()
 
-    async def achat(self, user_query: str) -> str:
-        """Async entry point — preferred."""
-        logger.info(f"Processing user query: {user_query}")
+    # ── Persistence helpers ────────────────────────────────────────────────
+
+    def _load_history_rows(self, user_id: int) -> list:
+        """Returns [(query, response), ...] for a user, oldest first."""
+        if not self.sql_engine:
+            return []
         try:
-            handler = self.agent.run(user_query)
+            with self.sql_engine.connect() as conn:
+                rows = conn.execute(
+                    text("""
+                        SELECT query, response
+                        FROM agent_logs
+                        WHERE user_id = :uid AND active = 1
+                        ORDER BY date DESC, id DESC
+                        LIMIT :limit
+                    """),
+                    {"uid": user_id, "limit": self.HISTORY_LIMIT},
+                ).fetchall()
+            return list(reversed(rows))
+        except Exception as e:
+            logger.error(f"Error loading agent history for user {user_id}: {e}")
+            return []
+
+    def _save_turn(self, user_id: int, query: str, response: str) -> None:
+        if not self.sql_engine:
+            return
+        try:
+            with self.sql_engine.begin() as conn:
+                conn.execute(
+                    text("""
+                        INSERT INTO agent_logs (user_id, query, response)
+                        VALUES (:uid, :q, :r)
+                    """),
+                    {"uid": user_id, "q": query, "r": response},
+                )
+        except Exception as e:
+            logger.error(f"Error saving agent turn for user {user_id}: {e}")
+
+    async def _get_context(self, user_id: int) -> Context:
+        """
+        Returns the user's workflow context, creating it on first use.
+        When created, the conversation is replayed from the database so the
+        agent keeps prior context even after a server restart.
+        """
+        ctx = self._user_contexts.get(user_id)
+        if ctx is not None:
+            return ctx
+
+        ctx = Context(self.agent)
+        rows = self._load_history_rows(user_id)
+        if rows:
+            messages: list[ChatMessage] = []
+            for q, r in rows:
+                if q:
+                    messages.append(ChatMessage(role=MessageRole.USER, content=str(q)))
+                if r:
+                    messages.append(ChatMessage(role=MessageRole.ASSISTANT, content=str(r)))
+            memory = ChatMemoryBuffer.from_defaults(chat_history=messages, token_limit=3000)
+            await ctx.store.set("memory", memory)
+            logger.info(f"Restored {len(rows)} prior turn(s) for user {user_id} from DB.")
+        else:
+            logger.info(f"Created fresh conversation context for user {user_id}.")
+
+        self._user_contexts[user_id] = ctx
+        return ctx
+
+    # ── Public API ─────────────────────────────────────────────────────────
+
+    async def achat(self, user_query: str, user_id: int = 1) -> str:
+        """Async entry point — preferred. Passes the user's persistent context to the agent."""
+        logger.info(f"[user={user_id}] Processing: {user_query[:80]}")
+        ctx = await self._get_context(user_id)
+        try:
+            handler = self.agent.run(ctx=ctx, user_msg=user_query)
             response = await handler
-            return str(response)
+            response_str = str(response)
         except Exception as e:
             logger.error(f"Error during agent execution: {e}")
             return f"I'm sorry, an error occurred while processing the request: {e}"
 
-    def chat(self, user_query: str) -> str:
+        self._save_turn(user_id, user_query, response_str)
+        return response_str
+
+    async def get_history(self, user_id: int) -> list[dict]:
+        """
+        Returns the conversation the agent takes into account, read from the
+        database so it survives restarts. The stored responses are already the
+        clean final answers (the ReAct scratchpad is never persisted).
+        """
+        history: list[dict] = []
+        for q, r in self._load_history_rows(user_id):
+            if q:
+                history.append({"role": "user", "content": str(q)})
+            if r:
+                history.append({"role": "bot", "content": str(r)})
+        return history
+
+    def clear_history(self, user_id: int) -> None:
+        """Drops the in-memory context and soft-deletes the user's DB history."""
+        self._user_contexts.pop(user_id, None)
+        if not self.sql_engine:
+            return
+        try:
+            with self.sql_engine.begin() as conn:
+                conn.execute(
+                    text("UPDATE agent_logs SET active = 0 WHERE user_id = :uid"),
+                    {"uid": user_id},
+                )
+            logger.info(f"Cleared agent history for user {user_id}.")
+        except Exception as e:
+            logger.error(f"Error clearing agent history for user {user_id}: {e}")
+
+    def chat(self, user_query: str, user_id: int = 1) -> str:
         """Sync wrapper for environments that aren't async."""
-        return self._loop.run_until_complete(self.achat(user_query))
+        return self._loop.run_until_complete(self.achat(user_query, user_id))
 
 
 # ==========================================

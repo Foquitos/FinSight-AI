@@ -4,6 +4,7 @@ from typing import List, Dict, Optional
 
 class AgentChatRequest(BaseModel):
     query: str = Field(..., min_length=1, example="Is a $1,250 electronics purchase at 3am international fraud?")
+    user_id: int = Field(default=1)
 
 
 class AgentChatResponse(BaseModel):
