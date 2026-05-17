@@ -81,8 +81,8 @@ FinSight-AI/
 │   │   │   └── analyser.py       # NLSQLTableQueryEngine
 │   │   ├── ml/
 │   │   │   ├── predictor.py      # FraudPredictor + PurchasePredictor
-│   │   │   ├── transformers.py   # Custom sklearn transformers
-│   │   │   └── models/           # Trained .joblib artifacts
+│   │   │   └── transformers.py   # Custom sklearn transformers
+│   │   ├── models/              # Trained .joblib artifacts
 │   │   └── database/
 │   │       └── database.py       # SQLite engine + table init
 │   ├── config.py             # Pydantic settings + LlamaIndex init
