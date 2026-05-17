@@ -12,11 +12,11 @@ pandas
 tiktoken
 pydantic_settings
 scikit-learn
+joblib
 matplotlib
 seaborn
 numpy
 polars
-mistralai
 
 # ==========================================
 # LlamaIndex Integrations (Plugins)

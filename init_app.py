@@ -20,6 +20,7 @@ import sys
 import platform
 import subprocess
 import textwrap
+import argparse
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -334,19 +335,90 @@ def print_summary():
     """))
 
 
+# ── Helpers for --step mode ────────────────────────────────────────────────────
+
+def _get_venv_python():
+    """Returns (python, pip) paths from the existing venv without creating it."""
+    venv_dir = os.path.join(ROOT, ".venv")
+    is_windows = platform.system() == "Windows"
+    python = os.path.join(venv_dir, "Scripts" if is_windows else "bin", "python" + (".exe" if is_windows else ""))
+    pip    = os.path.join(venv_dir, "Scripts" if is_windows else "bin", "pip"    + (".exe" if is_windows else ""))
+    if not os.path.isfile(python):
+        fail("Virtual environment not found at .venv/")
+        fail("Run  python init_app.py  (without --step) to set it up first.")
+        sys.exit(1)
+    return python, pip
+
+
+def _run_single_step(step: int):
+    print()
+    print("=" * 62)
+    print(f"  FinSight AI — Step {step} only")
+    print("=" * 62)
+
+    if step == 1:
+        check_python()
+    elif step == 2:
+        check_python()
+        ensure_venv()
+    elif step == 3:
+        _, pip = _get_venv_python()
+        install_deps(pip)
+    elif step == 4:
+        setup_env()
+    elif step == 5:
+        python, _ = _get_venv_python()
+        load_datasets(python)
+    elif step == 6:
+        python, _ = _get_venv_python()
+        train_models(python)
+    elif step == 7:
+        python, _ = _get_venv_python()
+        build_rag_index(python)
+
+    print()
+    ok(f"Step {step} finished.")
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print()
-    print("=" * 62)
-    print("  FinSight AI — First-time Setup")
-    print("=" * 62)
+    parser = argparse.ArgumentParser(
+        description="FinSight AI — first-time setup script.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            Steps:
+              1  Check Python version
+              2  Create virtual environment
+              3  Install dependencies
+              4  Configure .env (Gemini API key)
+              5  Load CSV datasets into SQLite
+              6  Train ML models
+              7  Build RAG vector index
 
-    check_python()
-    python, pip = ensure_venv()
-    install_deps(pip)
-    setup_env()
-    load_datasets(python)
-    train_models(python)
-    build_rag_index(python)
-    print_summary()
+            Example — re-run only the training step after a failure:
+              python init_app.py --step 6
+        """),
+    )
+    parser.add_argument(
+        "--step", type=int, choices=range(1, 8), metavar="N",
+        help="Run only step N (1-7) instead of the full setup.",
+    )
+    args = parser.parse_args()
+
+    if args.step:
+        _run_single_step(args.step)
+    else:
+        print()
+        print("=" * 62)
+        print("  FinSight AI — First-time Setup")
+        print("=" * 62)
+
+        check_python()
+        python, pip = ensure_venv()
+        install_deps(pip)
+        setup_env()
+        load_datasets(python)
+        train_models(python)
+        build_rag_index(python)
+        print_summary()

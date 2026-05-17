@@ -851,7 +851,7 @@ class ChatBot:
             return
 
         try:
-            query = text("UPDATE dbo.[query_chatbots_logs] SET active = 0 WHERE user_id = :uid")
+            query = text("UPDATE query_chatbots_logs SET active = 0 WHERE user_id = :uid")
             
             with self.sql_engine.begin() as conn:
                 conn.execute(query, {"uid": user_id})
