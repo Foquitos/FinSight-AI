@@ -1,7 +1,9 @@
+import os
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 
 from app.config import settings  # noqa: F401 — initializes LlamaIndex Settings as side-effect
 from app.services.database.database import sqlite_engine
@@ -32,6 +34,13 @@ app = FastAPI(
 
 app.include_router(agent.router, prefix="/api/v1")
 app.include_router(chatbot.router, prefix="/api/v1")
+
+_FRONTEND = os.path.join(os.path.dirname(__file__), "..", "frontend", "index.html")
+
+
+@app.get("/", include_in_schema=False)
+def frontend():
+    return FileResponse(_FRONTEND)
 
 
 @app.get("/health", tags=["Health"])
