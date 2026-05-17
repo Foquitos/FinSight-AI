@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting up FinSight AI...")
-    app.state.agent = FinancialAgent()
+    app.state.agent = FinancialAgent(sql_engine=sqlite_engine)
     app.state.chatbot = finsight(sql_engine=sqlite_engine, read_only=True)
     logger.info("All services initialized.")
     yield

@@ -184,14 +184,17 @@ GET /health
 POST /api/v1/agent/chat
 ```
 
-The agent selects the right tool (knowledge base, SQL analysis, or ML prediction) based on the query.
+The agent selects the right tool (knowledge base, SQL analysis, or ML prediction) based on the query. It keeps per-user conversation history, so follow-up questions ("explain further", "what about that transaction?") are answered in context. History is persisted in SQLite and survives server restarts.
 
 **Request:**
 ```json
 {
-  "query": "Is a $3,200 transaction at 3am from an unrecognized device high risk?"
+  "query": "Is a $3,200 transaction at 3am from an unrecognized device high risk?",
+  "user_id": 1
 }
 ```
+
+`user_id` is optional (defaults to `1`) and scopes the conversation thread.
 
 **Response:**
 ```json
@@ -225,7 +228,11 @@ Streams the response as plain text. Uses hybrid BM25 + vector retrieval with rer
 
 ### Conversation history
 
+Both the agent and the chatbot maintain independent, per-user conversation threads persisted in SQLite.
+
 ```
+GET  /api/v1/agent/history/{user_id}
+POST /api/v1/agent/clear-history/{user_id}
 GET  /api/v1/chatbot/history/{user_id}
 POST /api/v1/chatbot/clear-history/{user_id}
 ```
@@ -285,7 +292,8 @@ DEFAULT_RERANKER_TOP_N     = 3
 
 - The ChromaDB vector store and SQLite database are gitignored. Run `init_app.py` to regenerate them locally.
 - The RAG index is built once by `init_app.py`; production workers load it read-only.
-- Chat history is stored in SQLite and reconstructed per user on each request, making it safe to run multiple Uvicorn workers.
+- Chatbot history is stored in SQLite (`query_chatbots_logs`) and reconstructed per user on each request, making it safe to run multiple Uvicorn workers.
+- Agent history is stored in a separate SQLite table (`agent_logs`). On first message after a restart, the agent replays the user's prior turns from the database into its working memory, so context survives restarts.
 - Semantic caching (3-day TTL) avoids redundant LLM calls for similar queries.
 
 ---

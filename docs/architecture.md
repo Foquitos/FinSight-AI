@@ -30,7 +30,8 @@ The core design challenge was integrating these three heterogeneous backends und
 │                                                                      │
 │   GET  /                           (serves frontend/index.html)     │
 │   POST /api/v1/agent/chat          POST /api/v1/chatbot/chat        │
-│   GET  /api/v1/chatbot/history     POST /api/v1/chatbot/clear-…     │
+│   GET  /api/v1/agent/history       GET  /api/v1/chatbot/history     │
+│   POST /api/v1/agent/clear-…       POST /api/v1/chatbot/clear-…     │
 │   GET  /health                                                       │
 └───────────┬──────────────────────────────────┬──────────────────────┘
             │                                  │
@@ -91,7 +92,7 @@ Both tabs expose pre-filled example prompts for quick exploration and auto-resiz
 - `FraudPredictionTool` — Calls `FraudPredictor.predict()`
 - `PurchasePredictionTool` — Calls `PurchasePredictor.predict()`
 
-**SQLite Database** — Three tables: `transactions` (fraud dataset), `customers` (purchase dataset), `query_chatbots_logs` (chat history + token usage). Using SQLite instead of an in-memory store lets the app reconstruct conversation history across multiple Uvicorn workers.
+**SQLite Database** — Four tables: `transactions` (fraud dataset), `customers` (purchase dataset), `query_chatbots_logs` (RAG chatbot history + token usage), and `agent_logs` (agent conversation history). The agent and chatbot use separate tables so their independent conversation threads never mix. Using SQLite instead of an in-memory store lets the app reconstruct conversation history across restarts and multiple Uvicorn workers.
 
 ---
 
@@ -100,11 +101,14 @@ Both tabs expose pre-filled example prompts for quick exploration and auto-resiz
 ### 3.1 Agent request (tool-based)
 
 ```
-User query
-  → ReActAgent parses intent
+User query + user_id
+  → Load/create per-user workflow Context
+       (first time after restart → replay prior turns from agent_logs)
+  → ReActAgent parses intent (with conversation history in context)
   → Selects tool(s) based on query type
   → Tool executes (SQL / ML inference / RAG lookup)
   → Agent synthesizes result into natural language
+  → Turn persisted to agent_logs
   → Response returned to user
 ```
 
@@ -258,9 +262,9 @@ Before retrieval, each query is checked against previously answered queries usin
 
 ### Per-user memory in SQLite
 
-**Decision:** Conversation history is stored in `query_chatbots_logs` and reconstructed per request from SQLite, rather than held in memory.
+**Decision:** Conversation history is persisted in SQLite, rather than held only in memory. The chatbot reconstructs its memory from `query_chatbots_logs` on every request. The agent keeps a live LlamaIndex workflow `Context` per user for low-latency follow-ups, but persists every turn to `agent_logs` and, on the first message after a restart, replays the user's prior turns from the database into a fresh `Context` memory buffer.
 
-**Trade-off:** This makes the system stateless at the worker level, safe to run with multiple Uvicorn workers, and resilient to restarts. The cost is a database read on every chatbot request. For high-concurrency production use, this would be replaced with Redis or a similar in-memory cache.
+**Trade-off:** Persistence makes the system resilient to restarts and keeps the chatbot path safe for multiple Uvicorn workers. The agent's in-memory `Context` is per-process, so under multiple workers a user's live context is not shared across workers — but because every turn is persisted, any worker can rebuild full context from `agent_logs` on the next message. The cost is a database read when a context is first created (and per request for the chatbot). For high-concurrency production use, the in-memory layer would be replaced with Redis or a shared store.
 
 ### ReActAgent with max_iterations=10
 

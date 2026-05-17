@@ -22,7 +22,7 @@ sqlite_engine = create_engine(
 )
 
 def init_sqlite_db():
-    """Crea la tabla de logs si no existe en el archivo SQLite."""
+    """Crea las tablas de logs si no existen en el archivo SQLite."""
     try:
         with sqlite_engine.begin() as conn:
             conn.execute(text("""
@@ -36,6 +36,18 @@ def init_sqlite_db():
                     input_tokens INTEGER,
                     output_tokens INTEGER,
                     embedding_tokens INTEGER,
+                    date DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    active INTEGER DEFAULT 1
+                )
+            """))
+            # Separate table for the agent so its conversation does not mix
+            # with the RAG chatbot's history (they are independent threads).
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS agent_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    query TEXT,
+                    response TEXT,
                     date DATETIME DEFAULT CURRENT_TIMESTAMP,
                     active INTEGER DEFAULT 1
                 )
