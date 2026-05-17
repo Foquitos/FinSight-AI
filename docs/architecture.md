@@ -124,6 +124,7 @@ User query + user_id
   → Cross-encoder reranker selects top-3 chunks
   → LLM generates answer with retrieved context
   → Response streamed token-by-token
+  → Deterministic citation footer appended (source document filenames)
   → Result + tokens logged to SQLite
 ```
 
@@ -159,10 +160,18 @@ These features encode domain knowledge (brute-force attack patterns) directly in
 - Hyperparameter grid: `n_estimators` ∈ {50, 100}, `max_depth` ∈ {None, 5, 10}, `min_samples_split` ∈ {2, 5}
 - `class_weight='balanced'` to handle any residual imbalance
 
-**Performance:**
-- Cross-validation Recall: **1.00** on training set
+**Performance** — measured on the held-out 20-row stratified test set (10 fraud / 10 legit). Reproducible with `python notebooks/evaluate_models.py`, which loads the serialized pipeline and scores it on the same `random_state=42` split the training notebook used:
 
-> **Important caveat:** The perfect recall score reflects the synthetic, perfectly balanced nature of the 100-row dataset, not the model's real-world generalization ability. On a production dataset (typically <2% fraud rate, millions of rows), this model would require retraining with SMOTE or threshold calibration, and recall would drop to a realistic range. This prototype prioritizes demonstrating the *pipeline architecture* over validated model performance.
+| Metric | Class 0 (legit) | Class 1 (fraud) |
+|---|---|---|
+| Precision | 1.000 | 1.000 |
+| Recall | 1.000 | 1.000 |
+| F1-score | 1.000 | 1.000 |
+
+- **Accuracy: 1.000** · **ROC-AUC: 1.000**
+- Confusion matrix `[[TN=10, FP=0], [FN=0, TP=10]]` — zero false negatives and zero false positives on the test split.
+
+> **Important caveat:** These perfect scores reflect the synthetic, perfectly balanced 100-row dataset (50 fraud / 50 legit) and the trivially small 20-row test set — not real-world generalization. On a production dataset (typically <2% fraud rate, millions of rows), this model would require retraining with SMOTE or threshold calibration, and metrics would drop to a realistic range. This prototype prioritizes demonstrating the *pipeline architecture* over validated model performance.
 
 ---
 
@@ -191,12 +200,17 @@ This avoids treating income brackets as unordered categorical values, which woul
 - `GridSearchCV` with `cv=5`, optimizing for **neg_mean_absolute_error** (MAE chosen over RMSE because purchase amounts don't have extreme outliers that would warrant penalizing large errors more heavily)
 - Hyperparameter grid: `n_estimators` ∈ {50, 100, 200}, `max_depth` ∈ {None, 10, 20}, `min_samples_split` ∈ {2, 5}, `min_samples_leaf` ∈ {1, 2}
 
-**Evaluation metrics computed on test set:**
-- Mean Absolute Error (MAE) — primary metric, same units as the target (USD)
-- Root Mean Squared Error (RMSE) — penalizes large prediction errors
-- R² Score — proportion of variance explained
+**Performance** — measured on the held-out 20-row test set (target range $112.30–$578.90, mean $336.88). Reproducible with `python notebooks/evaluate_models.py`:
 
-> The full metric output is available by running `notebooks/02_purchase_model_training.ipynb`.
+| Metric | Value | Interpretation |
+|---|---|---|
+| MAE | **$9.46** | Average error ≈ 2.8% of the mean purchase amount |
+| RMSE | **$23.71** | Larger errors are rare; no extreme misses |
+| R² | **0.976** | 97.6% of purchase-amount variance explained |
+
+The model captures the dominant spend drivers (membership tier, income bracket, transaction history) accurately.
+
+> **Important caveat:** As with the fraud model, these strong numbers partly reflect the small, clean, synthetic dataset and a 20-row test set. On noisier production data, expect a higher MAE and a lower R².
 
 ---
 
@@ -204,7 +218,12 @@ This avoids treating income brackets as unordered categorical values, which woul
 
 ### 5.1 Document processing
 
-The 20 financial markdown documents are parsed into sentence-level chunks using LlamaIndex's ingestion pipeline. Sentence-level chunking was chosen over fixed-size chunking because financial documents contain dense, self-contained statements (e.g., a single sentence defining a KYC threshold) that should not be split mid-thought.
+The 20 financial markdown documents are processed with a two-stage LlamaIndex ingestion pipeline:
+
+1. **`MarkdownNodeParser`** — splits each document along its Markdown heading structure, so a node never spans two unrelated sections and each node retains its section metadata.
+2. **`SentenceSplitter`** (`chunk_size=512`, `chunk_overlap=50`) — further divides long sections at sentence boundaries, capping chunk size while the 50-token overlap preserves context across chunk edges.
+
+Structure-aware parsing was chosen over naive fixed-size chunking because financial documents contain dense, self-contained statements (e.g., a single sentence defining a KYC threshold) that should not be split mid-thought. Respecting Markdown headings and sentence boundaries keeps each chunk semantically coherent.
 
 ### 5.2 Two-stage retrieval
 
@@ -227,6 +246,26 @@ Query
 ### 5.3 Semantic caching
 
 Before retrieval, each query is checked against previously answered queries using vector similarity. If a sufficiently similar query was answered within the last 3 days, the cached response is returned immediately — avoiding LLM inference costs entirely. This is particularly effective for a domain with repetitive regulatory questions.
+
+---
+
+### 5.4 Source citations
+
+Because the assistant is positioned as an **auditable analyst tool**, every grounded answer must cite the documents it used (an explicit product requirement). Rather than relying on the LLM to self-report its sources — which is unreliable and would clutter the prose — FinSight appends a **deterministic citation footer** built directly from the retrieved nodes' filenames:
+
+```
+---
+**Sources:** `08_kyc_procedures.md`, `02_anti_money_laundering_basics.md`
+```
+
+Design points:
+
+- Generated programmatically in `ChatBot._format_citations()` from the reranked `source_nodes`, so it always reflects exactly what was retrieved (no hallucinated citations).
+- Applied on **both** RAG paths — the streaming chatbot (`stream_query`, footer streamed as a final chunk) and the synchronous `query()` used by the agent's Knowledge Base tool.
+- **Cached with the response**, so semantic-cache hits remain citable and consistent with cache misses.
+- The agent's system prompt instructs the ReActAgent to preserve this `Sources` line verbatim in its final synthesis, so citations survive multi-tool reasoning.
+
+> Note: semantic-cache entries written before this feature lack the footer; they age out under the 3-day TTL, or `clear_full_cache()` can purge them immediately.
 
 ---
 
@@ -266,6 +305,14 @@ Before retrieval, each query is checked against previously answered queries usin
 
 **Trade-off:** Persistence makes the system resilient to restarts and keeps the chatbot path safe for multiple Uvicorn workers. The agent's in-memory `Context` is per-process, so under multiple workers a user's live context is not shared across workers — but because every turn is persisted, any worker can rebuild full context from `agent_logs` on the next message. The cost is a database read when a context is first created (and per request for the chatbot). For high-concurrency production use, the in-memory layer would be replaced with Redis or a shared store.
 
+### Identity model — single user, no authentication (prototype scope)
+
+**Decision:** Every request is scoped by an integer `user_id`, but there is no authentication or user-management layer. `user_id` defaults to `1` in the request schema (`app/schemas.py`) and is hardcoded to `1` by the frontend (`frontend/index.html`), so in practice the prototype operates as a single analyst — "user 1".
+
+**Rationale:** The persistence layer (`agent_logs`, `query_chatbots_logs`) and all memory-reconstruction logic are already keyed by `user_id`, so the *data model* is multi-user ready. What is intentionally deferred is the *identity* layer — login, user records, session/token management, and per-user access control. None of these add evaluative value to a fraud-analysis prototype, but all are required for a real deployment. The production path is described in §8 (Future Improvements).
+
+**Trade-off:** Keeping a single hardcoded user removes auth scaffolding and lets the demo focus on the analytical workflow, at the cost of not exercising multi-tenant isolation. Because the schema is already user-scoped, introducing real users is primarily an API/middleware addition rather than a data-model migration.
+
 ### ReActAgent with max_iterations=10
 
 **Decision:** The agent is capped at 10 tool calls per turn.
@@ -288,7 +335,7 @@ Given more time and production requirements, the following upgrades would have t
 
 1. **SMOTE for imbalanced data** — The fraud model needs to be validated on realistic class distributions. Implementing `imbalanced-learn`'s SMOTE in the training pipeline and calibrating the classification threshold (not just optimizing recall) is the highest-priority model improvement.
 
-2. **Actual metric benchmarking** — Run both notebooks against a holdout set and log metrics (classification report, ROC-AUC for fraud; MAE, RMSE, R² for purchase) to MLflow or a simple JSON artifact. The current architecture.md documents methodology but not final numbers.
+2. **Metric benchmarking → done; MLflow tracking next** — Held-out test metrics for both models are now documented in §4 and reproducible via `notebooks/evaluate_models.py`. The remaining work is to log these to MLflow (or a versioned JSON artifact) so metrics are tracked across retraining runs rather than recomputed ad hoc.
 
 3. **Input validation on ML tools** — The prediction tools currently accept free-text parameters that the LLM extracts. Adding Pydantic schema validation with sensible defaults and range checks would prevent inference errors on edge-case inputs.
 
@@ -302,13 +349,15 @@ Given more time and production requirements, the following upgrades would have t
 
 7. **Evaluation harness** — Build an automated eval suite that runs the agent against a fixed set of benchmark queries (data analysis, prediction, knowledge) and checks response correctness. This is essential for catching regressions when the LLM or retrieval parameters change.
 
+8. **User management & authentication** — Replace the single hardcoded `user_id=1` (see §7, *Identity model*) with a real identity layer: a `users` table, authentication (OAuth2 / JWT or SSO against the analyst directory), and session management so each request is attributed to the authenticated analyst. Add role-based access control (e.g., a junior analyst cannot clear another analyst's history; a supervisor can audit any thread) and per-user data isolation enforced at the query layer. Because `agent_logs` and `query_chatbots_logs` are already keyed by `user_id`, this is mostly an API/middleware addition rather than a data-model change, and it unlocks genuine multi-tenant use.
+
 ### Long-term (scale)
 
-8. **Fraud model retraining pipeline** — Implement a drift detector (e.g., Evidently AI) that monitors incoming transaction distributions and triggers a retraining job in Databricks when feature drift exceeds a threshold.
+9. **Fraud model retraining pipeline** — Implement a drift detector (e.g., Evidently AI) that monitors incoming transaction distributions and triggers a retraining job in Databricks when feature drift exceeds a threshold.
 
-9. **Explainability layer** — Add SHAP value computation to the `FraudPredictor` output so analysts receive not just a fraud probability but the specific features that drove the score (e.g., "international flag contributed +0.34 to fraud probability").
+10. **Explainability layer** — Add SHAP value computation to the `FraudPredictor` output so analysts receive not just a fraud probability but the specific features that drove the score (e.g., "international flag contributed +0.34 to fraud probability").
 
-10. **Multi-modal input** — Extend the agent to accept document uploads (transaction reports, customer statements) and process them through the ingestion pipeline on the fly, rather than relying solely on pre-indexed documents.
+11. **Multi-modal input** — Extend the agent to accept document uploads (transaction reports, customer statements) and process them through the ingestion pipeline on the fly, rather than relying solely on pre-indexed documents.
 
 ---
 

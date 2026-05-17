@@ -39,6 +39,9 @@ Rules:
     Step 2: Use the Prediction tool to check the specific transaction.
     Step 3: Use the Knowledge Base to check policy alignment.
 - Be precise, analytical, and professional.
+- When you use the Knowledge Base Tool, ALWAYS preserve its "Sources" line
+  (the list of document filenames) verbatim at the end of your answer, so the
+  analyst can audit exactly which financial documents the answer came from.
 """
 
     # How many previous turns to replay into the agent's working memory.
