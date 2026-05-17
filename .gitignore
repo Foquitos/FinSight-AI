@@ -2,6 +2,7 @@
 .venv
 app/services/Rag_llm/finsight_embeddings
 app/services/database/database.db
+app/services/models/
 **/__pycache__/
 **/logs/
 models/
