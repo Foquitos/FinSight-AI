@@ -2,6 +2,7 @@
 
 An AI-powered conversational assistant for financial fraud analysts. FinSight combines Retrieval-Augmented Generation (RAG), machine learning predictions, and natural language data analysis into a single FastAPI backend.
 
+![FinSight AI demo](docs/demo.gif)
 ---
 
 ## What it does
