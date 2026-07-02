@@ -1,0 +1,5 @@
+# Extra dependencies for the notebooks in notebooks/ (model training / EDA).
+# Not required to run the API.
+-r requirements.txt
+matplotlib>=3,<4
+seaborn>=0.13,<1

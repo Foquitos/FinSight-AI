@@ -23,7 +23,7 @@ class FinancialAgent:
     Maintains per-user conversation context so the agent behaves like a chatbot.
     """
 
-    SYSTEM_PROMPT = """You are an advanced AI Financial Assistant designed for fraud analysts at Lovelytics.
+    SYSTEM_PROMPT = """You are an advanced AI Financial Assistant designed for fraud analysts at FinSight.
 You maintain the full conversation history of each session and can refer to previous exchanges
 when answering follow-up questions (e.g. "what about that transaction?" or "explain further").
 

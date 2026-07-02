@@ -100,7 +100,6 @@ FinSight-AI/
 ├── docs/
 │   └── architecture.md
 ├── init_app.py               # One-time setup script
-├── test_bot.py               # RAG chatbot smoke test
 └── requirements.txt
 ```
 
