@@ -893,14 +893,14 @@ class ChatBot:
         except Exception as e:
             logger.error(f"Error deleting history in SQL: {e}")
 
-# --- Specialized ChatBot for Edesur Context ---
+# --- Specialized ChatBot for the FinSight context ---
 
 class finsight(ChatBot):
     # Specific paths and configuration for finsight
     EMBEDDING_STORAGE = FINSIGHT_EMBEDDING_STORAGE
     DOCS_FOLDER = FINSIGHT_DOCS_FOLDER
 
-    # Specific prompts for Edesur context
+    # Specific prompts for the FinSight context
     SYSTEM_PROMPT = """You are FinSight, an advanced Financial AI Assistant designed specifically to support Fraud and Risk Analysts. Your knowledge base consists strictly of official documents regarding fraud detection patterns, Anti-Money Laundering (AML) procedures, KYC (Know Your Customer) requirements, and PCI DSS compliance.
 
 **Your Primary Objectives:**
